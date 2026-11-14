@@ -207,3 +207,50 @@ async def test_stop_before_start_is_a_noop(session_factory, test_settings) -> No
     await scheduler.stop()
 
     assert scheduler.is_running is False
+
+
+class CountingSessionFactory:
+    """Wrap a session factory and record how many sessions are open at once."""
+
+    def __init__(self, factory) -> None:
+        self._factory = factory
+        self.active = 0
+        self.max_active = 0
+
+    def __call__(self):
+        return _CountedSession(self)
+
+
+class _CountedSession:
+    def __init__(self, counter: CountingSessionFactory) -> None:
+        self._counter = counter
+        self._context = counter._factory()
+
+    async def __aenter__(self):
+        session = await self._context.__aenter__()
+        self._counter.active += 1
+        self._counter.max_active = max(self._counter.max_active, self._counter.active)
+        return session
+
+    async def __aexit__(self, *exc_info):
+        self._counter.active -= 1
+        return await self._context.__aexit__(*exc_info)
+
+
+async def test_admission_bounds_the_pre_probe_read(
+    session_factory,
+    create_monitor,
+    test_settings,
+) -> None:
+    for index in range(4):
+        await create_monitor(name=f"monitor-{index}")
+
+    counter = CountingSessionFactory(session_factory)
+    runner = CheckRunner(counter, TrackingProber(), max_concurrent_checks=1)
+    settings = test_settings.model_copy(update={"max_concurrent_checks": 1})
+    scheduler = Scheduler(runner, counter, settings)
+
+    checked = await scheduler.run_once()
+
+    assert checked == 4
+    assert counter.max_active == 1

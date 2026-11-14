@@ -18,7 +18,7 @@ This document defines mandatory architectural rules, coding conventions, and ver
 ## 2. Tech Stack Boundaries
 
 * **Frontend**: Next.js (App Router), TypeScript (`strict: true`), Tailwind CSS, Shadcn/UI, Recharts.
-* **Backend**: FastAPI, Python 3.12+, Pydantic v2, SQLAlchemy 2.0 (Async), Alembic, `httpx`, `APScheduler`.
+* **Backend**: FastAPI, Python 3.12+, Pydantic v2, SQLAlchemy 2.0 (Async), Alembic, `httpx`.
 * **Database**: PostgreSQL 16+ (via `asyncpg` driver for FastAPI and `psycopg` / `asyncpg` for Alembic).
 * **Containerization**: Docker & Docker Compose (`db`, `backend`, `frontend`).
 

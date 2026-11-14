@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Incident, Monitor, MonitorCheck
@@ -59,7 +60,9 @@ class CheckRunner:
 
     One in-process lock per monitor spans the probe and the write. The probe
     never holds a database connection, and the write is a single short
-    transaction with a row lock.
+    transaction with a row lock. The admission semaphore is taken before the
+    pre-probe read, so a due-monitor fan-out cannot open more sessions than
+    the pool allows.
     """
 
     def __init__(
@@ -102,16 +105,20 @@ class CheckRunner:
         if lock.locked():
             raise CheckAlreadyRunning(str(monitor_id))
 
-        async with lock:
-            target, snapshot = await self._load_target(monitor_id)
+        try:
             async with self._semaphore:
-                result = await self._prober(
-                    target,
-                    user_agent=self._user_agent,
-                    ssl_inspect_timeout_seconds=self._ssl_inspect_timeout_seconds,
-                    ssl_executor=self._ssl_executor,
-                )
-            return await self._record(monitor_id, snapshot, result)
+                async with lock:
+                    target, snapshot = await self._load_target(monitor_id)
+                    result = await self._prober(
+                        target,
+                        user_agent=self._user_agent,
+                        ssl_inspect_timeout_seconds=self._ssl_inspect_timeout_seconds,
+                        ssl_executor=self._ssl_executor,
+                    )
+                    return await self._record(monitor_id, snapshot, result)
+        except (MonitorNotFound, MonitorPaused):
+            self.forget(monitor_id)
+            raise
 
     async def _load_target(self, monitor_id: UUID) -> tuple[ProbeTarget, TargetSnapshot]:
         async with self._session_factory() as session:
@@ -206,11 +213,19 @@ class CheckRunner:
                     monitor.ssl_days_remaining = result.ssl_days_remaining
 
                 if transition.open_incident:
-                    session.add(
-                        Incident(
+                    # A second replica can insert the open incident between the
+                    # read above and this write. Dropping the conflict keeps the
+                    # check and the status update in the same transaction.
+                    await session.execute(
+                        pg_insert(Incident)
+                        .values(
                             monitor_id=monitor_id,
                             started_at=checked_at,
                             cause=result.error_message or "Check failed",
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=["monitor_id"],
+                            index_where=Incident.resolved_at.is_(None),
                         )
                     )
                 elif transition.resolve_incident:
