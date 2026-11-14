@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.analytics import latency_bucket, to_latency_point
 from app.core.deps import get_current_user, require_admin
+from app.core.errors import public_errors
 from app.db.models import Incident, Monitor, MonitorCheck, User
 from app.db.session import get_db
 from app.schemas.monitor import (
@@ -271,7 +272,7 @@ async def update_monitor(
     except ValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=exc.errors(include_url=False, include_context=False),
+            detail=public_errors(exc),
         ) from exc
 
     target_changed = any(

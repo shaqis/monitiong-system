@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import EmailStr, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -7,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BCRYPT_MAX_PASSWORD_BYTES = 72
 MIN_ADMIN_PASSWORD_LENGTH = 12
 MIN_JWT_SECRET_LENGTH = 32
+
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 PLACEHOLDER_ADMIN_PASSWORDS = frozenset(
     {
@@ -26,6 +29,13 @@ PLACEHOLDER_JWT_SECRETS = frozenset(
 )
 
 JwtAlgorithm = Literal["HS256", "HS384", "HS512"]
+
+
+def _is_loopback_origin(origin: str) -> bool:
+    host = urlparse(origin).hostname
+    if host is None:
+        return False
+    return host in LOOPBACK_HOSTS or host.endswith(".localhost")
 
 
 class DatabaseSettings(BaseSettings):
@@ -89,6 +99,29 @@ class Settings(BaseSettings):
         if value.strip().lower() in PLACEHOLDER_JWT_SECRETS:
             raise ValueError("JWT_SECRET must not be a documented placeholder")
         return value
+
+    @field_validator("cors_origins")
+    @classmethod
+    def validate_cors_origins(cls, value: list[str]) -> list[str]:
+        # Credentialed requests make a wildcard origin reflect the caller's
+        # Origin, so the browser would accept authenticated cross-site reads.
+        if any(origin.strip() == "*" for origin in value):
+            raise ValueError(
+                "CORS_ORIGINS must not contain the wildcard '*' while credentials are allowed"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_cookie_secure(self) -> "Settings":
+        # A plaintext cookie is acceptable only against a loopback frontend.
+        # Anything reachable over a network needs the Secure attribute.
+        if not self.cookie_secure and not all(
+            _is_loopback_origin(origin) for origin in self.cors_origins
+        ):
+            raise ValueError(
+                "COOKIE_SECURE must be true unless every CORS_ORIGINS entry is a loopback origin"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_pool_covers_checks(self) -> "Settings":

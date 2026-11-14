@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, StringConstraints
 
-from app.core.config import BCRYPT_MAX_PASSWORD_BYTES
+from app.core.config import BCRYPT_MAX_PASSWORD_BYTES, MIN_ADMIN_PASSWORD_LENGTH
 
 Role = Literal["admin", "viewer"]
 
@@ -22,7 +22,10 @@ def _password_fits_bcrypt(value: str) -> str:
 
 Password = Annotated[
     str,
-    StringConstraints(min_length=8, max_length=BCRYPT_MAX_PASSWORD_BYTES),
+    StringConstraints(
+        min_length=MIN_ADMIN_PASSWORD_LENGTH,
+        max_length=BCRYPT_MAX_PASSWORD_BYTES,
+    ),
     AfterValidator(_password_fits_bcrypt),
 ]
 

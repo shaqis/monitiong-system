@@ -3,8 +3,10 @@ from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
+from app.api.v1.users import ADMIN_GUARD_LOCK, _is_unique_violation
 from app.db.models import User
 
 
@@ -418,3 +420,108 @@ async def test_concurrent_patch_cannot_remove_last_admin(
 
     assert statuses == [200, 403]
     assert len(active_admins) == 1
+
+
+async def test_create_validation_does_not_echo_the_password(
+    client: AsyncClient,
+    admin,
+    login,
+) -> None:
+    await login(admin.email, "admin-password")
+    secret = "too-short1"
+
+    response = await client.post(
+        "/api/v1/users",
+        json={
+            "email": "echo@example.com",
+            "full_name": "Echo",
+            "password": secret,
+        },
+    )
+
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert all("input" not in error and "ctx" not in error for error in response.json()["detail"])
+
+
+async def test_is_unique_violation_matches_only_unique_sqlstates(session_factory) -> None:
+    async with session_factory() as session:
+        session.add(
+            User(
+                email="duplicate@example.com",
+                full_name="Duplicate",
+                hashed_password="hash",
+                role="viewer",
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        session.add(
+            User(
+                email="duplicate@example.com",
+                full_name="Duplicate",
+                hashed_password="hash",
+                role="viewer",
+            )
+        )
+        with pytest.raises(IntegrityError) as duplicate:
+            await session.flush()
+        await session.rollback()
+
+    async with session_factory() as session:
+        session.add(
+            User(
+                email="no-name@example.com",
+                full_name=None,
+                hashed_password="hash",
+                role="viewer",
+            )
+        )
+        with pytest.raises(IntegrityError) as missing_name:
+            await session.flush()
+        await session.rollback()
+
+    assert _is_unique_violation(duplicate.value)
+    assert not _is_unique_violation(missing_name.value)
+
+
+async def test_patch_waits_for_the_admin_guard_lock(
+    client: AsyncClient,
+    admin,
+    create_user,
+    login,
+    session_factory,
+) -> None:
+    await create_user(
+        email="second-admin@example.com",
+        password="second-password",
+        role="admin",
+    )
+    await login(admin.email, "admin-password")
+
+    async with session_factory() as holder, session_factory() as watcher:
+        await holder.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:name))"),
+            {"name": ADMIN_GUARD_LOCK},
+        )
+        request = asyncio.create_task(
+            client.patch(f"/api/v1/users/{admin.id}", json={"role": "viewer"})
+        )
+
+        waiting = 0
+        for _ in range(100):
+            waiting = await watcher.scalar(
+                text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.05)
+
+        assert waiting, "the PATCH never waited on the advisory lock"
+        assert not request.done()
+        await holder.rollback()
+
+    response = await asyncio.wait_for(request, timeout=5)
+
+    assert response.status_code == 200
