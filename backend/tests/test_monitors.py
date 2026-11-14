@@ -9,6 +9,7 @@ from app.db.models import Incident, Monitor, MonitorCheck
 from app.main import app
 from app.worker.checker import CheckRunner
 from app.worker.prober import ProbeResult
+from app.worker.scheduler import Scheduler
 
 
 @pytest.fixture
@@ -857,3 +858,211 @@ async def test_pausing_a_monitor_resolves_its_open_incident(
     assert response.json()["is_active"] is False
     await session.refresh(incident)
     assert incident.resolved_at is not None
+
+
+async def _failing_prober(target, **_kwargs) -> ProbeResult:
+    return ProbeResult(
+        ok=False,
+        status_code=503,
+        response_time_ms=25,
+        keyword_matched=None,
+        error_message="Expected 200, got 503",
+        ssl_days_remaining=None,
+    )
+
+
+async def test_check_now_unknown_monitor_does_not_keep_a_lock(
+    client,
+    admin,
+    login,
+) -> None:
+    token = await login(admin.email, "admin-password")
+    missing = uuid4()
+
+    response = await client.post(
+        f"/api/v1/monitors/{missing}/check-now",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 404
+    assert missing not in app.state.check_runner._locks
+
+
+async def test_check_now_paused_monitor_does_not_keep_a_lock(
+    client,
+    admin,
+    login,
+) -> None:
+    token = await login(admin.email, "admin-password")
+    created = await _create(client, token)
+    await client.patch(
+        f"/api/v1/monitors/{created['id']}",
+        json={"is_active": False},
+        headers=_auth(token),
+    )
+
+    response = await client.post(
+        f"/api/v1/monitors/{created['id']}/check-now",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 409
+    assert UUID(created["id"]) not in app.state.check_runner._locks
+
+
+async def test_check_now_racing_a_scheduled_tick_records_one_check(
+    client,
+    admin,
+    create_monitor,
+    session_factory,
+    test_settings,
+    login,
+) -> None:
+    monitor = await create_monitor(name="racing")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated_prober(target, **_kwargs) -> ProbeResult:
+        started.set()
+        await release.wait()
+        return ProbeResult(
+            ok=True,
+            status_code=200,
+            response_time_ms=10,
+            keyword_matched=None,
+            error_message=None,
+            ssl_days_remaining=None,
+        )
+
+    runner = CheckRunner(session_factory, gated_prober)
+    app.state.check_runner = runner
+    scheduler = Scheduler(runner, session_factory, test_settings)
+    token = await login(admin.email, "admin-password")
+
+    tick = asyncio.create_task(scheduler.run_once())
+    await started.wait()
+
+    response = await asyncio.wait_for(
+        client.post(f"/api/v1/monitors/{monitor.id}/check-now", headers=_auth(token)),
+        timeout=5,
+    )
+
+    release.set()
+    checked = await tick
+
+    assert response.status_code == 409
+    assert checked == 1
+    async with session_factory() as check_session:
+        total = await check_session.scalar(
+            select(func.count())
+            .select_from(MonitorCheck)
+            .where(MonitorCheck.monitor_id == monitor.id)
+        )
+    assert total == 1
+
+
+async def test_patch_name_only_keeps_the_cycle_when_the_stored_url_needs_normalization(
+    client,
+    admin,
+    create_monitor,
+    session,
+    login,
+) -> None:
+    monitor = await create_monitor(
+        url="https://example.com/path?",
+        current_status="DOWN",
+        consecutive_failures=2,
+        last_checked_at=datetime.now(UTC),
+    )
+    incident = Incident(
+        monitor_id=monitor.id,
+        started_at=datetime.now(UTC) - timedelta(minutes=5),
+        cause="Expected 200, got 503",
+    )
+    session.add(incident)
+    await session.commit()
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        f"/api/v1/monitors/{monitor.id}",
+        json={"name": "Renamed"},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["name"] == "Renamed"
+    assert body["current_status"] == "DOWN"
+    assert body["consecutive_failures"] == 2
+    assert body["last_checked_at"] is not None
+    await session.refresh(incident)
+    assert incident.resolved_at is None
+
+
+async def test_resume_after_pause_needs_two_strikes_again(
+    client,
+    admin,
+    create_monitor,
+    session,
+    session_factory,
+    login,
+) -> None:
+    monitor = await create_monitor(current_status="DOWN", consecutive_failures=2)
+    incident = Incident(
+        monitor_id=monitor.id,
+        started_at=datetime.now(UTC) - timedelta(minutes=5),
+        cause="Connection failed",
+    )
+    session.add(incident)
+    await session.commit()
+    token = await login(admin.email, "admin-password")
+
+    paused = await client.patch(
+        f"/api/v1/monitors/{monitor.id}",
+        json={"is_active": False},
+        headers=_auth(token),
+    )
+
+    assert paused.status_code == 200
+    assert paused.json()["consecutive_failures"] == 0
+
+    app.state.check_runner = CheckRunner(session_factory, _failing_prober)
+    resumed = await client.patch(
+        f"/api/v1/monitors/{monitor.id}",
+        json={"is_active": True},
+        headers=_auth(token),
+    )
+    assert resumed.status_code == 200
+
+    check = await client.post(
+        f"/api/v1/monitors/{monitor.id}/check-now",
+        headers=_auth(token),
+    )
+    assert check.status_code == 201
+
+    detail = await client.get(f"/api/v1/monitors/{monitor.id}", headers=_auth(token))
+    assert detail.json()["current_status"] == "DEGRADED"
+    assert detail.json()["consecutive_failures"] == 1
+    async with session_factory() as incident_session:
+        open_incidents = await incident_session.scalar(
+            select(func.count())
+            .select_from(Incident)
+            .where(Incident.monitor_id == monitor.id, Incident.resolved_at.is_(None))
+        )
+    assert open_incidents == 0
+
+
+async def test_create_preserves_url_path_query_fragment_and_userinfo(
+    client,
+    admin,
+    login,
+) -> None:
+    token = await login(admin.email, "admin-password")
+
+    created = await _create(
+        client,
+        token,
+        url="HTTPS://user:pass@example.com:8443/a/b?x=1&y=2#frag",
+    )
+
+    assert created["url"] == "https://user:pass@example.com:8443/a/b?x=1&y=2#frag"

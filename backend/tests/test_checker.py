@@ -424,3 +424,100 @@ async def test_forget_drops_the_monitor_lock(
 
     runner.forget(monitor.id)
     assert monitor.id not in runner._locks
+
+
+async def test_incident_insert_conflict_keeps_the_check(
+    session_factory,
+    create_monitor,
+) -> None:
+    """A writer that opens an incident mid-check must not discard the check.
+
+    The trigger stands in for a concurrent backend replica that inserts the
+    open incident after this runner read the incident state, which is the
+    window where the partial unique index can reject the insert.
+    """
+    monitor = await create_monitor(current_status="DEGRADED", consecutive_failures=1)
+
+    async with session_factory() as setup:
+        await setup.execute(text("DROP INDEX IF EXISTS uq_incidents_open_monitor"))
+        await setup.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_incidents_open_monitor "
+                "ON incidents (monitor_id) WHERE resolved_at IS NULL"
+            )
+        )
+        await setup.execute(
+            text(
+                """
+                CREATE FUNCTION open_incident_on_check() RETURNS trigger
+                LANGUAGE plpgsql AS $$
+                BEGIN
+                  INSERT INTO incidents (monitor_id, started_at, cause)
+                  VALUES (NEW.monitor_id, NEW.checked_at, 'concurrent writer');
+                  RETURN NEW;
+                END
+                $$;
+                """
+            )
+        )
+        await setup.execute(
+            text(
+                "CREATE TRIGGER open_incident_on_check AFTER INSERT ON monitor_checks "
+                "FOR EACH ROW EXECUTE FUNCTION open_incident_on_check()"
+            )
+        )
+        await setup.commit()
+
+    runner = CheckRunner(session_factory, SequenceProber([_failure()]))
+    try:
+        await runner.run(monitor.id)
+    finally:
+        async with session_factory() as cleanup:
+            await cleanup.execute(
+                text("DROP TRIGGER IF EXISTS open_incident_on_check ON monitor_checks")
+            )
+            await cleanup.execute(text("DROP FUNCTION IF EXISTS open_incident_on_check()"))
+            await cleanup.commit()
+
+    checks = await _checks(session_factory, monitor.id)
+    incidents = await _incidents(session_factory, monitor.id)
+    stored = await _stored_monitor(session_factory, monitor.id)
+
+    assert len(checks) == 1
+    assert [incident.cause for incident in incidents] == ["concurrent writer"]
+    assert incidents[0].resolved_at is None
+    assert stored is not None
+    assert stored.current_status == "DOWN"
+    assert stored.consecutive_failures == 2
+
+
+async def test_aclose_refuses_new_probe_work(session_factory, create_monitor) -> None:
+    class ExecutorProber:
+        async def __call__(self, target, **kwargs) -> ProbeResult:
+            kwargs["ssl_executor"].submit(lambda: None)
+            return _success()
+
+    monitor = await create_monitor()
+    runner = CheckRunner(session_factory, ExecutorProber())
+
+    await runner.run(monitor.id)
+    runner.aclose()
+
+    with pytest.raises(RuntimeError):
+        await runner.run(monitor.id)
+
+
+async def test_forget_keeps_a_lock_that_is_in_use(
+    session_factory,
+    create_monitor,
+) -> None:
+    monitor = await create_monitor()
+    runner = CheckRunner(session_factory, SequenceProber([]))
+
+    lock = runner._lock_for(monitor.id)
+    async with lock:
+        runner.forget(monitor.id)
+        assert monitor.id in runner._locks
+
+    runner.forget(monitor.id)
+    assert monitor.id not in runner._locks

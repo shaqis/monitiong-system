@@ -19,21 +19,21 @@ down_revision: str | None = "c4d2e6f8a1b3"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+DEDUPE_OPEN_INCIDENTS = """
+    UPDATE incidents
+    SET resolved_at = now()
+    WHERE resolved_at IS NULL
+      AND id NOT IN (
+        SELECT DISTINCT ON (monitor_id) id
+        FROM incidents
+        WHERE resolved_at IS NULL
+        ORDER BY monitor_id, started_at DESC, id DESC
+      )
+"""
+
 
 def upgrade() -> None:
-    op.execute(
-        """
-        UPDATE incidents
-        SET resolved_at = now()
-        WHERE resolved_at IS NULL
-          AND id NOT IN (
-            SELECT DISTINCT ON (monitor_id) id
-            FROM incidents
-            WHERE resolved_at IS NULL
-            ORDER BY monitor_id, started_at DESC, id DESC
-          )
-        """
-    )
+    op.execute(DEDUPE_OPEN_INCIDENTS)
     op.create_index(
         "uq_incidents_open_monitor",
         "incidents",

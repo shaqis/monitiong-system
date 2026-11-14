@@ -1,7 +1,9 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from runpy import run_path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -124,3 +126,58 @@ async def test_deleting_monitor_cascades_checks_and_incidents(
 
     assert checks == []
     assert incidents == []
+
+
+MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "alembic"
+    / "versions"
+    / "d7e1f2a3b4c5_harden_incident_invariants.py"
+)
+DEDUPE_OPEN_INCIDENTS = run_path(str(MIGRATION_PATH))["DEDUPE_OPEN_INCIDENTS"]
+
+
+async def test_incident_dedupe_keeps_the_earliest_open_incident(
+    session_factory,
+    create_monitor,
+) -> None:
+    monitor = await create_monitor()
+    now = datetime.now(UTC).replace(microsecond=0)
+
+    async with session_factory() as setup:
+        await setup.execute(text("DROP INDEX IF EXISTS uq_incidents_open_monitor"))
+        setup.add_all(
+            [
+                Incident(
+                    monitor_id=monitor.id,
+                    started_at=now - timedelta(hours=hours),
+                    cause=f"{hours}h ago",
+                )
+                for hours in (3, 1, 2)
+            ]
+        )
+        await setup.commit()
+
+    async with session_factory() as dedupe:
+        await dedupe.execute(text(DEDUPE_OPEN_INCIDENTS))
+        await dedupe.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_incidents_open_monitor "
+                "ON incidents (monitor_id) WHERE resolved_at IS NULL"
+            )
+        )
+        await dedupe.commit()
+
+    async with session_factory() as check:
+        rows = list(
+            (
+                await check.scalars(
+                    select(Incident)
+                    .where(Incident.monitor_id == monitor.id)
+                    .order_by(Incident.started_at)
+                )
+            ).all()
+        )
+
+    assert [row.resolved_at is None for row in rows] == [True, False, False]
+    assert rows[0].started_at == now - timedelta(hours=3)
