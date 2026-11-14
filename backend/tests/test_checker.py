@@ -166,6 +166,52 @@ async def test_recovery_resets_state_and_resolves_incident(
     assert incidents[0].resolved_at is not None
 
 
+async def test_recurring_incidents_are_opened_and_resolved_independently(
+    session_factory,
+    create_monitor,
+) -> None:
+    monitor = await create_monitor()
+    runner = CheckRunner(
+        session_factory,
+        SequenceProber(
+            [
+                _failure(),
+                _failure(),
+                _success(),
+                _failure(),
+                _failure(),
+            ]
+        ),
+    )
+
+    await runner.run(monitor.id)
+    await runner.run(monitor.id)
+    opened = await _incidents(session_factory, monitor.id)
+    assert len(opened) == 1
+    first_incident_id = opened[0].id
+    assert opened[0].resolved_at is None
+
+    await runner.run(monitor.id)
+    resolved = await _incidents(session_factory, monitor.id)
+    assert len(resolved) == 1
+    assert resolved[0].id == first_incident_id
+    assert resolved[0].resolved_at is not None
+
+    await runner.run(monitor.id)
+    await runner.run(monitor.id)
+    incidents = await _incidents(session_factory, monitor.id)
+    assert len(incidents) == 2
+    by_id = {incident.id: incident for incident in incidents}
+    assert by_id[first_incident_id].resolved_at is not None
+    second = next(incident for incident in incidents if incident.id != first_incident_id)
+    assert second.resolved_at is None
+
+    stored = await _stored_monitor(session_factory, monitor.id)
+    assert stored is not None
+    assert stored.current_status == "DOWN"
+    assert stored.consecutive_failures == 2
+
+
 async def test_connection_failure_records_null_status_code(
     session_factory,
     create_monitor,

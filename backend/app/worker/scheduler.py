@@ -8,7 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.db.models import Monitor
-from app.worker.checker import CheckAlreadyRunning, CheckRunner, MonitorNotFound, MonitorPaused
+from app.worker.checker import (
+    CheckAlreadyRunning,
+    CheckRunner,
+    MonitorChanged,
+    MonitorNotFound,
+    MonitorPaused,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +26,12 @@ def _interval_seconds(value: int) -> ColumnElement[object]:
 
 
 class Scheduler:
-    """Poll due monitors and run their checks without blocking the loop."""
+    """Poll due monitors and run their checks without blocking the loop.
+
+    Single-process only: the scheduler and the per-monitor locks in
+    ``CheckRunner`` are process-local. Running a second backend replica would
+    probe every monitor twice, so compose runs one backend process.
+    """
 
     def __init__(
         self,
@@ -72,7 +83,7 @@ class Scheduler:
         async with self._semaphore:
             try:
                 await self._runner.run(monitor_id)
-            except (CheckAlreadyRunning, MonitorNotFound, MonitorPaused):
+            except (CheckAlreadyRunning, MonitorChanged, MonitorNotFound, MonitorPaused):
                 return False
             except Exception:
                 logger.exception("Monitor check failed", extra={"monitor_id": str(monitor_id)})

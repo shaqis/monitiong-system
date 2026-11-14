@@ -20,6 +20,7 @@ router = APIRouter()
 
 RECENT_STATUS_COUNT = 20
 RECENT_INCIDENT_LIMIT = 20
+STATUS_STRIP_LOOKBACK_DAYS = 30
 
 
 @router.get("/summary", response_model=DashboardSummary)
@@ -146,6 +147,7 @@ async def _status_strips(
 ) -> list[MonitorStatusStrip]:
     statuses: dict[UUID, list[str]] = {monitor.id: [] for monitor in monitors}
     if monitors:
+        since = datetime.now(UTC) - timedelta(days=STATUS_STRIP_LOOKBACK_DAYS)
         ranked = (
             select(
                 MonitorCheck.monitor_id,
@@ -158,7 +160,10 @@ async def _status_strips(
                 )
                 .label("position"),
             )
-            .where(MonitorCheck.monitor_id.in_([monitor.id for monitor in monitors]))
+            .where(
+                MonitorCheck.monitor_id.in_([monitor.id for monitor in monitors]),
+                MonitorCheck.checked_at >= since,
+            )
             .subquery()
         )
         rows = await db.execute(

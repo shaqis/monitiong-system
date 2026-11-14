@@ -265,6 +265,45 @@ async def test_list_returns_uptime_latency_and_ssl(
     assert item["ssl_days_remaining"] == 30
 
 
+async def test_list_uptime_and_latency_use_each_monitors_own_checks(
+    client,
+    viewer,
+    create_monitor,
+    session,
+    login,
+) -> None:
+    first = await create_monitor(name="First Monitor")
+    second = await create_monitor(name="Second Monitor")
+    now = datetime.now(UTC)
+    await _add_checks(
+        session,
+        first.id,
+        [
+            ("UP", now - timedelta(minutes=1), 100),
+            ("DOWN", now - timedelta(minutes=2), 900),
+            ("UP", now - timedelta(hours=25), 50),
+        ],
+    )
+    await _add_checks(
+        session,
+        second.id,
+        [
+            ("DOWN", now - timedelta(minutes=1), 200),
+            ("DOWN", now - timedelta(minutes=2), 800),
+            ("DOWN", now - timedelta(hours=25), 60),
+        ],
+    )
+    token = await login(viewer.email, "viewer-password")
+
+    response = await client.get("/api/v1/monitors", headers=_auth(token))
+
+    items = {item["id"]: item for item in response.json()}
+    assert items[str(first.id)]["uptime_24h"] == 50.0
+    assert items[str(second.id)]["uptime_24h"] == 0.0
+    assert items[str(first.id)]["last_response_time_ms"] == 100
+    assert items[str(second.id)]["last_response_time_ms"] == 200
+
+
 async def test_detail_returns_all_three_uptime_windows(
     client,
     viewer,
@@ -566,6 +605,66 @@ async def test_check_now_while_in_flight_returns_conflict(
     await task
 
     assert response.status_code == 409
+
+
+async def test_check_now_discards_result_when_target_changes_mid_probe(
+    client,
+    admin,
+    session,
+    session_factory,
+    login,
+) -> None:
+    token = await login(admin.email, "admin-password")
+    created = await _create(client, token)
+    monitor_id = UUID(created["id"])
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocking_prober(target, **_kwargs) -> ProbeResult:
+        started.set()
+        await release.wait()
+        return ProbeResult(
+            ok=True,
+            status_code=200,
+            response_time_ms=10,
+            keyword_matched=None,
+            error_message=None,
+            ssl_days_remaining=None,
+        )
+
+    app.state.check_runner = CheckRunner(session_factory, blocking_prober)
+
+    request = asyncio.create_task(
+        client.post(
+            f"/api/v1/monitors/{monitor_id}/check-now",
+            headers=_auth(token),
+        ),
+    )
+    await started.wait()
+
+    monitor = await session.get(Monitor, monitor_id)
+    assert monitor is not None
+    monitor.url = "https://changed.example.com"
+    await session.commit()
+
+    release.set()
+    response = await request
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Monitor changed during check"
+
+    async with session_factory() as check_session:
+        checks = await check_session.scalar(
+            select(func.count())
+            .select_from(MonitorCheck)
+            .where(MonitorCheck.monitor_id == monitor_id),
+        )
+        stored = await check_session.get(Monitor, monitor_id)
+    assert checks == 0
+    assert stored is not None
+    assert stored.current_status == "PENDING"
+    assert stored.last_checked_at is None
 
 
 async def test_check_history_ranges_and_pagination(

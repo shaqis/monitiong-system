@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select
 
 from app.db.models import MonitorCheck
-from app.worker.checker import CheckRunner
+from app.worker.checker import CheckRunner, MonitorChanged
 from app.worker.prober import ProbeResult, ProbeTarget
 from app.worker.scheduler import Scheduler
 
@@ -53,6 +53,11 @@ class TrackingProber:
         await asyncio.sleep(0.02)
         self.active -= 1
         return _success()
+
+
+class ChangedRunner:
+    async def run(self, monitor_id) -> None:
+        raise MonitorChanged(str(monitor_id))
 
 
 async def _check_total(session_factory) -> int:
@@ -143,6 +148,19 @@ async def test_no_monitors_returns_zero(session_factory, test_settings) -> None:
     scheduler = Scheduler(runner, session_factory, test_settings)
 
     assert await scheduler.run_once() == 0
+
+
+async def test_monitor_changed_during_probe_is_ignored(
+    session_factory,
+    create_monitor,
+    test_settings,
+) -> None:
+    await create_monitor()
+
+    scheduler = Scheduler(ChangedRunner(), session_factory, test_settings)
+
+    assert await scheduler.run_once() == 0
+    assert await _check_total(session_factory) == 0
 
 
 async def test_loop_wakes_before_the_poll_for_a_retry(

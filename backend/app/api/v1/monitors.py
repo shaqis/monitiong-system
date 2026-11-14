@@ -24,7 +24,13 @@ from app.schemas.monitor import (
     StatusFilter,
     TimeRange,
 )
-from app.worker.checker import CheckAlreadyRunning, CheckRunner, MonitorNotFound, MonitorPaused
+from app.worker.checker import (
+    CheckAlreadyRunning,
+    CheckRunner,
+    MonitorChanged,
+    MonitorNotFound,
+    MonitorPaused,
+)
 
 router = APIRouter()
 
@@ -291,6 +297,11 @@ async def check_monitor_now(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="A check is already running for this monitor",
+        ) from None
+    except MonitorChanged:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Monitor changed during check",
         ) from None
 
 

@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -19,6 +20,16 @@ from app.worker.state import MonitorState, apply_probe_result
 Prober = Callable[..., Awaitable[ProbeResult]]
 
 
+@dataclass(frozen=True, slots=True)
+class TargetSnapshot:
+    """The monitor identity that was probed, used to reject stale results."""
+
+    url: str
+    http_method: str
+    expected_status_code: int
+    keyword: str | None
+
+
 class MonitorNotFound(Exception):
     """The monitor does not exist."""
 
@@ -29,6 +40,10 @@ class MonitorPaused(Exception):
 
 class CheckAlreadyRunning(Exception):
     """A check for this monitor is already in flight."""
+
+
+class MonitorChanged(Exception):
+    """The monitor target changed while the probe was in flight."""
 
 
 class CheckRunner:
@@ -68,16 +83,29 @@ class CheckRunner:
             raise CheckAlreadyRunning(str(monitor_id))
 
         async with lock:
-            target = await self._load_target(monitor_id, require_active=require_active)
+            target, snapshot = await self._load_target(
+                monitor_id,
+                require_active=require_active,
+            )
             async with self._semaphore:
                 result = await self._prober(
                     target,
                     user_agent=self._user_agent,
                     ssl_inspect_timeout_seconds=self._ssl_inspect_timeout_seconds,
                 )
-            return await self._record(monitor_id, result, require_active=require_active)
+            return await self._record(
+                monitor_id,
+                snapshot,
+                result,
+                require_active=require_active,
+            )
 
-    async def _load_target(self, monitor_id: UUID, *, require_active: bool) -> ProbeTarget:
+    async def _load_target(
+        self,
+        monitor_id: UUID,
+        *,
+        require_active: bool,
+    ) -> tuple[ProbeTarget, TargetSnapshot]:
         async with self._session_factory() as session:
             row = (
                 await session.execute(
@@ -98,7 +126,7 @@ class CheckRunner:
         if require_active and not row.is_active:
             raise MonitorPaused(str(monitor_id))
 
-        return ProbeTarget(
+        target = ProbeTarget(
             url=row.url,
             http_method=row.http_method,
             timeout_seconds=row.timeout_seconds,
@@ -106,10 +134,18 @@ class CheckRunner:
             keyword=row.keyword,
             check_ssl=row.check_ssl,
         )
+        snapshot = TargetSnapshot(
+            url=row.url,
+            http_method=row.http_method,
+            expected_status_code=row.expected_status_code,
+            keyword=row.keyword,
+        )
+        return target, snapshot
 
     async def _record(
         self,
         monitor_id: UUID,
+        snapshot: TargetSnapshot,
         result: ProbeResult,
         *,
         require_active: bool,
@@ -124,6 +160,13 @@ class CheckRunner:
                     raise MonitorNotFound(str(monitor_id))
                 if require_active and not monitor.is_active:
                     raise MonitorPaused(str(monitor_id))
+                if (
+                    monitor.url != snapshot.url
+                    or monitor.http_method != snapshot.http_method
+                    or monitor.expected_status_code != snapshot.expected_status_code
+                    or monitor.keyword != snapshot.keyword
+                ):
+                    raise MonitorChanged(str(monitor_id))
 
                 open_incident = await session.scalar(
                     select(Incident)
@@ -171,7 +214,5 @@ class CheckRunner:
                     )
                 elif transition.resolve_incident and open_incident is not None:
                     open_incident.resolved_at = checked_at
-
-            await session.refresh(check)
 
         return check

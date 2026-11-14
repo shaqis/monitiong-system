@@ -162,6 +162,46 @@ async def test_summary_includes_recent_status_strips(
     assert strip["recent_statuses"][0] == "DOWN"
 
 
+async def test_summary_status_strips_are_partitioned_per_monitor(
+    client: AsyncClient,
+    viewer,
+    create_monitor,
+    session,
+    login,
+) -> None:
+    first = await create_monitor(name="First Strip", current_status="UP")
+    second = await create_monitor(name="Second Strip", current_status="DOWN")
+    now = datetime.now(UTC)
+    for index in range(20):
+        checked_at = now - timedelta(minutes=index)
+        session.add(
+            MonitorCheck(
+                monitor_id=first.id,
+                status="UP",
+                status_code=200,
+                response_time_ms=10,
+                checked_at=checked_at,
+            ),
+        )
+        session.add(
+            MonitorCheck(
+                monitor_id=second.id,
+                status="DOWN",
+                status_code=503,
+                response_time_ms=20,
+                checked_at=checked_at,
+            ),
+        )
+    await session.commit()
+    await login(viewer.email, "viewer-password")
+
+    body = (await client.get("/api/v1/dashboard/summary?range=24h")).json()
+
+    strips = {item["id"]: item for item in body["monitors"]}
+    assert strips[str(first.id)]["recent_statuses"] == ["UP"] * 20
+    assert strips[str(second.id)]["recent_statuses"] == ["DOWN"] * 20
+
+
 async def test_summary_lists_active_and_recently_resolved_incidents(
     client: AsyncClient,
     viewer,

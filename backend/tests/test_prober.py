@@ -1,4 +1,6 @@
 import socket
+import threading
+import time
 
 import httpx
 import pytest
@@ -188,6 +190,35 @@ async def test_ssl_inspection_failure_returns_none(monkeypatch) -> None:
 
     assert result.ok is True
     assert result.ssl_days_remaining is None
+
+
+async def test_ssl_inspection_timeout_returns_none_without_blocking_the_check(
+    monkeypatch,
+) -> None:
+    release = threading.Event()
+
+    def hanging_inspect(url: str, timeout_seconds: float) -> int | None:
+        release.wait(10)
+        return 12
+
+    monkeypatch.setattr(prober, "inspect_ssl_days", hanging_inspect)
+    started_at = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(
+            transport=_transport(lambda request: httpx.Response(200, text="ok")),
+        ) as client:
+            result = await probe(
+                ProbeTarget(url="https://example.test", check_ssl=True),
+                client=client,
+                ssl_inspect_timeout_seconds=0.2,
+            )
+    finally:
+        elapsed = time.perf_counter() - started_at
+        release.set()
+
+    assert result.ok is True
+    assert result.ssl_days_remaining is None
+    assert elapsed < 2.0
 
 
 async def test_ssl_inspection_skipped_without_response(monkeypatch) -> None:

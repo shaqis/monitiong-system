@@ -24,6 +24,10 @@ Swagger UI is at http://localhost:8000/docs. The OpenAPI document is at http://l
 
 If you change `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` after the first start, run `docker compose down -v` before starting again. The database volume keeps the old credentials.
 
+## One backend process
+
+Run exactly one `backend` service. The scheduler and the per-monitor check locks are process-local, so a second backend replica would probe every monitor twice. Docker Compose starts one backend process; scale PostgreSQL, not the API replicas.
+
 ## Verify
 
 ```bash

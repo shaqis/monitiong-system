@@ -11,9 +11,14 @@ import httpx
 DEFAULT_USER_AGENT = "UptimeMonitor/1.0"
 DEFAULT_SSL_INSPECT_TIMEOUT_SECONDS = 5.0
 MAX_ERROR_MESSAGE_LENGTH = 500
+MAX_KEYWORD_BODY_BYTES = 1_048_576
+KEYWORD_CHUNK_SIZE = 64 * 1024
 
 SSL_CERT_TIME_FORMAT = "%b %d %H:%M:%S %Y %Z"
 SECONDS_PER_DAY = 86400
+
+# One context avoids rebuilding the trust store for every inspection.
+_SSL_CONTEXT = ssl.create_default_context()
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +47,17 @@ def _bounded(message: str | None) -> str | None:
     return message[:MAX_ERROR_MESSAGE_LENGTH]
 
 
+def _failed(message: str | None) -> ProbeResult:
+    return ProbeResult(
+        ok=False,
+        status_code=None,
+        response_time_ms=None,
+        keyword_matched=None,
+        error_message=_bounded(message),
+        ssl_days_remaining=None,
+    )
+
+
 def _status_matches(expected_status_code: int, actual_status_code: int) -> bool:
     if expected_status_code == 200:
         return 200 <= actual_status_code <= 299
@@ -60,9 +76,8 @@ def inspect_ssl_days(
             return None
 
         port = parsed.port or 443
-        context = ssl.create_default_context()
         with socket.create_connection((host, port), timeout=timeout_seconds) as raw_socket:
-            with context.wrap_socket(raw_socket, server_hostname=host) as tls_socket:
+            with _SSL_CONTEXT.wrap_socket(raw_socket, server_hostname=host) as tls_socket:
                 certificate = tls_socket.getpeercert()
 
         if not certificate:
@@ -96,88 +111,58 @@ async def _execute(
 ) -> ProbeResult:
     started_at = time.perf_counter()
     try:
-        response = await client.request(
-            target.http_method.upper(),
-            target.url,
-            headers={"User-Agent": user_agent},
-            timeout=target.timeout_seconds,
-            follow_redirects=True,
-        )
+        # The wall-clock budget covers redirects, headers, and the body read.
+        async with asyncio.timeout(target.timeout_seconds):
+            async with client.stream(
+                target.http_method.upper(),
+                target.url,
+                headers={"User-Agent": user_agent},
+                timeout=target.timeout_seconds,
+                follow_redirects=True,
+            ) as response:
+                status_code = response.status_code
+                final_url = str(response.url)
+
+                keyword_matched: bool | None = None
+                if target.keyword is not None:
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes(chunk_size=KEYWORD_CHUNK_SIZE):
+                        body.extend(chunk)
+                        if len(body) >= MAX_KEYWORD_BODY_BYTES:
+                            del body[MAX_KEYWORD_BODY_BYTES:]
+                            break
+                    keyword_matched = target.keyword.encode("utf-8") in body
+
+                response_time_ms = int((time.perf_counter() - started_at) * 1000)
+    except TimeoutError:
+        return _failed(f"Request timed out after {target.timeout_seconds}s")
     except httpx.TimeoutException:
-        return ProbeResult(
-            ok=False,
-            status_code=None,
-            response_time_ms=None,
-            keyword_matched=None,
-            error_message=_bounded(f"Request timed out after {target.timeout_seconds}s"),
-            ssl_days_remaining=None,
-        )
+        return _failed(f"Request timed out after {target.timeout_seconds}s")
     except httpx.ConnectError as exc:
-        return ProbeResult(
-            ok=False,
-            status_code=None,
-            response_time_ms=None,
-            keyword_matched=None,
-            error_message=_bounded(f"Connection failed: {exc}"),
-            ssl_days_remaining=None,
-        )
+        return _failed(f"Connection failed: {exc}")
     except httpx.HTTPError as exc:
-        return ProbeResult(
-            ok=False,
-            status_code=None,
-            response_time_ms=None,
-            keyword_matched=None,
-            error_message=_bounded(f"HTTP error: {exc}"),
-            ssl_days_remaining=None,
-        )
+        return _failed(f"HTTP error: {exc}")
     except ssl.SSLError as exc:
-        return ProbeResult(
-            ok=False,
-            status_code=None,
-            response_time_ms=None,
-            keyword_matched=None,
-            error_message=_bounded(f"TLS error: {exc}"),
-            ssl_days_remaining=None,
-        )
+        return _failed(f"TLS error: {exc}")
     except socket.gaierror as exc:
-        return ProbeResult(
-            ok=False,
-            status_code=None,
-            response_time_ms=None,
-            keyword_matched=None,
-            error_message=_bounded(f"DNS lookup failed: {exc}"),
-            ssl_days_remaining=None,
-        )
+        return _failed(f"DNS lookup failed: {exc}")
     except Exception as exc:
-        return ProbeResult(
-            ok=False,
-            status_code=None,
-            response_time_ms=None,
-            keyword_matched=None,
-            error_message=_bounded(f"Probe failed: {type(exc).__name__}: {exc}"),
-            ssl_days_remaining=None,
-        )
+        return _failed(f"Probe failed: {type(exc).__name__}: {exc}")
 
-    response_time_ms = int((time.perf_counter() - started_at) * 1000)
-    status_ok = _status_matches(target.expected_status_code, response.status_code)
-    keyword_matched: bool | None = None
-    if target.keyword is not None:
-        keyword_matched = target.keyword in response.text
-
+    status_ok = _status_matches(target.expected_status_code, status_code)
     error_message: str | None = None
     if not status_ok:
-        error_message = f"Expected {target.expected_status_code}, got {response.status_code}"
+        error_message = f"Expected {target.expected_status_code}, got {status_code}"
     elif keyword_matched is False:
-        error_message = f"Keyword {target.keyword!r} not found in response body"
+        error_message = f"Keyword {target.keyword!r} not found in first 1 MiB of response body"
 
     ssl_days_remaining: int | None = None
-    final_url = str(response.url)
     if target.check_ssl and final_url.startswith("https://"):
         ssl_days_remaining = await _ssl_days_remaining(final_url, ssl_inspect_timeout_seconds)
 
     return ProbeResult(
         ok=status_ok and keyword_matched is not False,
-        status_code=response.status_code,
+        status_code=status_code,
         response_time_ms=response_time_ms,
         keyword_matched=keyword_matched,
         error_message=_bounded(error_message),
