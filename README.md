@@ -55,6 +55,8 @@ docker compose exec frontend npm run lint
 docker compose exec frontend npm run build
 ```
 
+The Phase 5 end-to-end verification record, with screenshots and database comparisons, is in [`docs/verification/phase-5.md`](docs/verification/phase-5.md).
+
 ## Layout
 
 ```text
