@@ -29,7 +29,7 @@ MAX_URL_LENGTH = 2048
 MAX_KEYWORD_LENGTH = 255
 
 
-def _validate_http_url(value: str) -> str:
+def normalize_http_url(value: str) -> str:
     parsed = urlparse(value)
     scheme = parsed.scheme.lower()
     if scheme not in ("http", "https"):
@@ -46,7 +46,7 @@ Name = Annotated[
 HttpUrl = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_URL_LENGTH),
-    AfterValidator(_validate_http_url),
+    AfterValidator(normalize_http_url),
 ]
 Keyword = Annotated[
     str,

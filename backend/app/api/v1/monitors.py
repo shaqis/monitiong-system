@@ -24,6 +24,7 @@ from app.schemas.monitor import (
     MonitorUpdate,
     StatusFilter,
     TimeRange,
+    normalize_http_url,
 )
 from app.worker.checker import (
     TARGET_FIELDS,
@@ -79,6 +80,18 @@ async def _reset_target_state(
     monitor.consecutive_failures = 0
     monitor.last_checked_at = None
     await _resolve_open_incidents(db, monitor.id, resolved_at)
+
+
+def _stored_target(monitor: Monitor, field: str) -> object:
+    """The stored target value in the same shape a validated payload has."""
+    value = getattr(monitor, field)
+    if field != "url":
+        return value
+    try:
+        return normalize_http_url(value)
+    except ValueError:
+        # A row written before the validator can hold a URL it rejects.
+        return value
 
 
 def _percent(up: int, total: int) -> float | None:
@@ -276,7 +289,7 @@ async def update_monitor(
         ) from exc
 
     target_changed = any(
-        getattr(validated, field) != getattr(monitor, field) for field in TARGET_FIELDS
+        getattr(validated, field) != _stored_target(monitor, field) for field in TARGET_FIELDS
     )
 
     for field in MonitorCreate.model_fields:
@@ -286,6 +299,8 @@ async def update_monitor(
         await _reset_target_state(db, monitor, datetime.now(UTC))
 
     if payload.is_active is False:
+        # The next cycle starts from zero, so a resume needs two strikes.
+        monitor.consecutive_failures = 0
         await _resolve_open_incidents(db, monitor.id, datetime.now(UTC))
 
     await db.commit()
