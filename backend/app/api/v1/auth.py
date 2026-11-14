@@ -34,7 +34,11 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = create_access_token(user.id, settings)
+    token = create_access_token(
+        user.id,
+        settings,
+        token_version=user.token_version or 0,
+    )
     response.set_cookie(
         key=settings.auth_cookie_name,
         value=token,

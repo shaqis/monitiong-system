@@ -1,9 +1,31 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import EmailStr, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BCRYPT_MAX_PASSWORD_BYTES = 72
+MIN_ADMIN_PASSWORD_LENGTH = 12
+MIN_JWT_SECRET_LENGTH = 32
+
+PLACEHOLDER_ADMIN_PASSWORDS = frozenset(
+    {
+        "change-me-now",
+        "changeme",
+        "replace-me",
+        "your-password-here",
+    }
+)
+PLACEHOLDER_JWT_SECRETS = frozenset(
+    {
+        "local-dev-jwt-secret-at-least-32-bytes",
+        "change-me-now",
+        "replace-me",
+        "your-secret-here",
+    }
+)
+
+JwtAlgorithm = Literal["HS256", "HS384", "HS512"]
 
 
 class DatabaseSettings(BaseSettings):
@@ -12,6 +34,7 @@ class DatabaseSettings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     database_url: str
@@ -23,6 +46,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     database_url: str
@@ -31,10 +55,10 @@ class Settings(BaseSettings):
     first_admin_name: str
     cors_origins: list[str] = ["http://localhost:3000"]
     jwt_secret: str
-    jwt_algorithm: str = "HS256"
+    jwt_algorithm: JwtAlgorithm = "HS256"
     jwt_expire_minutes: int = 60
     auth_cookie_name: str = "access_token"
-    cookie_secure: bool = False
+    cookie_secure: bool = True
     scheduler_enabled: bool = True
     scheduler_poll_seconds: int = Field(default=10, ge=1)
     scheduler_retry_seconds: int = Field(default=5, ge=1)
@@ -49,6 +73,21 @@ class Settings(BaseSettings):
     def validate_first_admin_password(cls, value: str) -> str:
         if len(value.encode("utf-8")) > BCRYPT_MAX_PASSWORD_BYTES:
             raise ValueError("FIRST_ADMIN_PASSWORD must be at most 72 bytes")
+        if len(value) < MIN_ADMIN_PASSWORD_LENGTH:
+            raise ValueError(
+                f"FIRST_ADMIN_PASSWORD must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters"
+            )
+        if value.strip().lower() in PLACEHOLDER_ADMIN_PASSWORDS:
+            raise ValueError("FIRST_ADMIN_PASSWORD must not be a documented placeholder")
+        return value
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def validate_jwt_secret(cls, value: str) -> str:
+        if len(value.encode("utf-8")) < MIN_JWT_SECRET_LENGTH:
+            raise ValueError(f"JWT_SECRET must be at least {MIN_JWT_SECRET_LENGTH} bytes")
+        if value.strip().lower() in PLACEHOLDER_JWT_SECRETS:
+            raise ValueError("JWT_SECRET must not be a documented placeholder")
         return value
 
     @model_validator(mode="after")

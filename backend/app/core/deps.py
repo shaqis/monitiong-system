@@ -32,12 +32,14 @@ async def get_current_user(
         raise _unauthorized()
 
     try:
-        user_id = decode_access_token(token, settings)
+        claims = decode_access_token(token, settings)
     except (PyJWTError, ValueError):
         raise _unauthorized() from None
 
-    user = await db.get(User, user_id)
+    user = await db.get(User, claims.user_id)
     if user is None or not user.is_active:
+        raise _unauthorized()
+    if (user.token_version or 0) != claims.token_version:
         raise _unauthorized()
 
     return user
