@@ -10,9 +10,10 @@ from app.db.seed import seed_first_admin
 def build_settings() -> Settings:
     return Settings(
         database_url="postgresql+asyncpg://uptime:uptime@db:5432/uptime",
-        first_admin_email="admin@test.local",
+        first_admin_email="admin@example.com",
         first_admin_password="secret",
         first_admin_name="Test Admin",
+        jwt_secret="test-secret-that-is-at-least-32-bytes-long",
     )
 
 
@@ -22,7 +23,7 @@ async def test_seed_creates_first_admin(session: AsyncSession) -> None:
     users = (await session.scalars(select(User))).all()
 
     assert len(users) == 1
-    assert users[0].email == "admin@test.local"
+    assert users[0].email == "admin@example.com"
     assert users[0].role == "admin"
     assert users[0].is_active is True
     assert verify_password("secret", users[0].hashed_password)
@@ -41,7 +42,7 @@ async def test_seed_is_idempotent(session: AsyncSession) -> None:
 async def test_seed_skips_when_users_exist(session: AsyncSession) -> None:
     session.add(
         User(
-            email="viewer@test.local",
+            email="viewer@example.com",
             full_name="Viewer",
             hashed_password="not-used",
             role="viewer",
@@ -55,4 +56,4 @@ async def test_seed_skips_when_users_exist(session: AsyncSession) -> None:
     users = (await session.scalars(select(User))).all()
 
     assert len(users) == 1
-    assert users[0].email == "viewer@test.local"
+    assert users[0].email == "viewer@example.com"
