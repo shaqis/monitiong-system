@@ -12,7 +12,7 @@ This document is structured for execution by an AI coding agent in a terminal-ba
 | ---------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | **Frontend**           | Next.js (App Router), TypeScript, Tailwind CSS, Shadcn/UI, Recharts | Responsive web dashboard, analytics visualizations, URL & user management UI |
 | **Backend**            | FastAPI (Python 3.12+), Pydantic v2, SQLAlchemy 2.0 (Async), Alembic | REST API, RBAC enforcement, async HTTP/SSL probing engine    |
-| **Worker / Scheduler** | Python `asyncio` + `APScheduler` (in-process or standalone worker) + `httpx` | Periodic non-blocking URL health checks, keyword verification, SSL checks |
+| **Worker / Scheduler** | Python `asyncio` (in-process loop) + `httpx` | Periodic non-blocking URL health checks, keyword verification, SSL checks |
 | **Database**           | PostgreSQL 16+                                               | Persistent storage for users, monitor configs, check logs, and incidents |
 | **Infrastructure**     | Docker & Docker Compose                                      | Reproducible local development and deployment (`db`, `backend`, `frontend`) |
 
