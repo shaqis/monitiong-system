@@ -1,4 +1,6 @@
 import asyncio
+import codecs
+import functools
 import socket
 import ssl
 import time
@@ -17,8 +19,11 @@ KEYWORD_CHUNK_SIZE = 64 * 1024
 SSL_CERT_TIME_FORMAT = "%b %d %H:%M:%S %Y %Z"
 SECONDS_PER_DAY = 86400
 
-# One context avoids rebuilding the trust store for every inspection.
-_SSL_CONTEXT = ssl.create_default_context()
+
+@functools.cache
+def _ssl_context() -> ssl.SSLContext:
+    """Build the trust-store-backed SSL context on first inspection."""
+    return ssl.create_default_context()
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +69,51 @@ def _status_matches(expected_status_code: int, actual_status_code: int) -> bool:
     return actual_status_code == expected_status_code
 
 
+def _incremental_decoder(encoding: str | None) -> codecs.IncrementalDecoder:
+    """Decode the body the same way ``response.text`` would.
+
+    The declared charset wins; an unknown codec falls back to UTF-8 so a bad
+    Content-Type header never turns a successful probe into a failure.
+    """
+    try:
+        factory = codecs.getincrementaldecoder(encoding or "utf-8")
+    except LookupError:
+        factory = codecs.getincrementaldecoder("utf-8")
+    return factory(errors="replace")
+
+
+async def _keyword_matches(response: httpx.Response, keyword: str) -> bool:
+    """Search decoded response text without retaining the whole body.
+
+    Reads at most one cap plus one keyword of slack, so a keyword that
+    straddles the cap still matches while the retained buffer stays near the
+    cap.
+    """
+    keyword_bytes = keyword.encode("utf-8")
+    byte_limit = MAX_KEYWORD_BODY_BYTES + len(keyword_bytes) - 1
+    decoder = _incremental_decoder(response.charset_encoding)
+
+    text = ""
+    read = 0
+    async for chunk in response.aiter_bytes(chunk_size=KEYWORD_CHUNK_SIZE):
+        if not chunk:
+            continue
+        remaining = byte_limit - read
+        if remaining <= 0:
+            break
+        if len(chunk) > remaining:
+            chunk = chunk[:remaining]
+        read += len(chunk)
+        text += decoder.decode(chunk, final=False)
+        if keyword in text:
+            return True
+        if read >= byte_limit:
+            break
+
+    text += decoder.decode(b"", final=True)
+    return keyword in text
+
+
 def inspect_ssl_days(
     url: str,
     timeout_seconds: float = DEFAULT_SSL_INSPECT_TIMEOUT_SECONDS,
@@ -77,7 +127,7 @@ def inspect_ssl_days(
 
         port = parsed.port or 443
         with socket.create_connection((host, port), timeout=timeout_seconds) as raw_socket:
-            with _SSL_CONTEXT.wrap_socket(raw_socket, server_hostname=host) as tls_socket:
+            with _ssl_context().wrap_socket(raw_socket, server_hostname=host) as tls_socket:
                 certificate = tls_socket.getpeercert()
 
         if not certificate:
@@ -122,18 +172,14 @@ async def _execute(
             ) as response:
                 status_code = response.status_code
                 final_url = str(response.url)
-
-                keyword_matched: bool | None = None
-                if target.keyword is not None:
-                    body = bytearray()
-                    async for chunk in response.aiter_bytes(chunk_size=KEYWORD_CHUNK_SIZE):
-                        body.extend(chunk)
-                        if len(body) >= MAX_KEYWORD_BODY_BYTES:
-                            del body[MAX_KEYWORD_BODY_BYTES:]
-                            break
-                    keyword_matched = target.keyword.encode("utf-8") in body
-
+                # Latency stops at the headers so keyword and non-keyword
+                # checks measure the same thing; the body read is not charged.
                 response_time_ms = int((time.perf_counter() - started_at) * 1000)
+
+                status_ok = _status_matches(target.expected_status_code, status_code)
+                keyword_matched: bool | None = None
+                if status_ok and target.keyword is not None:
+                    keyword_matched = await _keyword_matches(response, target.keyword)
     except TimeoutError:
         return _failed(f"Request timed out after {target.timeout_seconds}s")
     except httpx.TimeoutException:
@@ -149,7 +195,6 @@ async def _execute(
     except Exception as exc:
         return _failed(f"Probe failed: {type(exc).__name__}: {exc}")
 
-    status_ok = _status_matches(target.expected_status_code, status_code)
     error_message: str | None = None
     if not status_ok:
         error_message = f"Expected {target.expected_status_code}, got {status_code}"

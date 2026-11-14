@@ -19,10 +19,17 @@ from app.worker.state import MonitorState, apply_probe_result
 
 Prober = Callable[..., Awaitable[ProbeResult]]
 
+TARGET_FIELDS: tuple[str, ...] = (
+    "url",
+    "http_method",
+    "expected_status_code",
+    "keyword",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class TargetSnapshot:
-    """The monitor identity that was probed, used to reject stale results."""
+    """The four fields in TARGET_FIELDS that were probed, used to reject stale results."""
 
     url: str
     http_method: str
@@ -160,11 +167,8 @@ class CheckRunner:
                     raise MonitorNotFound(str(monitor_id))
                 if require_active and not monitor.is_active:
                     raise MonitorPaused(str(monitor_id))
-                if (
-                    monitor.url != snapshot.url
-                    or monitor.http_method != snapshot.http_method
-                    or monitor.expected_status_code != snapshot.expected_status_code
-                    or monitor.keyword != snapshot.keyword
+                if any(
+                    getattr(monitor, field) != getattr(snapshot, field) for field in TARGET_FIELDS
                 ):
                     raise MonitorChanged(str(monitor_id))
 
@@ -214,5 +218,7 @@ class CheckRunner:
                     )
                 elif transition.resolve_incident and open_incident is not None:
                     open_incident.resolved_at = checked_at
+
+            await session.refresh(check)
 
         return check

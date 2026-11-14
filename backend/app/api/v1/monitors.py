@@ -25,6 +25,7 @@ from app.schemas.monitor import (
     TimeRange,
 )
 from app.worker.checker import (
+    TARGET_FIELDS,
     CheckAlreadyRunning,
     CheckRunner,
     MonitorChanged,
@@ -33,13 +34,6 @@ from app.worker.checker import (
 )
 
 router = APIRouter()
-
-TARGET_FIELDS = (
-    "url",
-    "http_method",
-    "expected_status_code",
-    "keyword",
-)
 
 
 def get_check_runner(request: Request) -> CheckRunner:

@@ -607,12 +607,23 @@ async def test_check_now_while_in_flight_returns_conflict(
     assert response.status_code == 409
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("url", "https://changed.example.com"),
+        ("http_method", "HEAD"),
+        ("expected_status_code", 204),
+        ("keyword", "changed"),
+    ],
+)
 async def test_check_now_discards_result_when_target_changes_mid_probe(
     client,
     admin,
     session,
     session_factory,
     login,
+    field,
+    value,
 ) -> None:
     token = await login(admin.email, "admin-password")
     created = await _create(client, token)
@@ -645,7 +656,7 @@ async def test_check_now_discards_result_when_target_changes_mid_probe(
 
     monitor = await session.get(Monitor, monitor_id)
     assert monitor is not None
-    monitor.url = "https://changed.example.com"
+    setattr(monitor, field, value)
     await session.commit()
 
     release.set()

@@ -1,6 +1,8 @@
+import asyncio
 import socket
 import threading
 import time
+from collections.abc import AsyncGenerator, AsyncIterator
 
 import httpx
 import pytest
@@ -8,10 +10,68 @@ import pytest
 from app.worker import prober
 from app.worker.prober import (
     MAX_ERROR_MESSAGE_LENGTH,
+    MAX_KEYWORD_BODY_BYTES,
+    ProbeResult,
     ProbeTarget,
     inspect_ssl_days,
     probe,
 )
+
+
+class _ChunkStream(httpx.AsyncByteStream):
+    """Wrap an async byte generator in the interface httpx expects."""
+
+    def __init__(self, chunks: AsyncGenerator[bytes, None]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._chunks.aclose()
+
+
+class _RaisingStream(httpx.AsyncByteStream):
+    """A body stream that fails loudly if anything tries to read it."""
+
+    def __init__(self) -> None:
+        self.iterated = False
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        self.iterated = True
+        raise RuntimeError("body should not be read")
+
+
+class _StreamTransport(httpx.AsyncBaseTransport):
+    def __init__(
+        self,
+        stream: httpx.AsyncByteStream,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self._stream = stream
+        self._status_code = status_code
+        self._headers = headers
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            self._status_code,
+            headers=self._headers,
+            stream=self._stream,
+        )
+
+
+async def _probe_stream(
+    stream: httpx.AsyncByteStream,
+    target: ProbeTarget,
+    *,
+    status_code: int = 200,
+    headers: dict[str, str] | None = None,
+) -> ProbeResult:
+    transport = _StreamTransport(stream, status_code, headers)
+    async with httpx.AsyncClient(transport=transport) as client:
+        return await probe(target, client=client)
 
 
 def _transport(handler) -> httpx.MockTransport:
@@ -86,6 +146,160 @@ async def test_head_with_keyword_fails_on_empty_body() -> None:
 
     assert result.ok is False
     assert result.keyword_matched is False
+
+
+async def test_keyword_drip_body_times_out() -> None:
+    async def drip() -> AsyncIterator[bytes]:
+        for _ in range(200):
+            yield b"x"
+            await asyncio.sleep(0.05)
+
+    started_at = time.perf_counter()
+    result = await _probe_stream(
+        _ChunkStream(drip()),
+        ProbeTarget(
+            url="http://example.test",
+            keyword="operator",
+            timeout_seconds=1,
+            check_ssl=False,
+        ),
+    )
+    elapsed = time.perf_counter() - started_at
+
+    assert result.ok is False
+    assert result.status_code is None
+    assert result.error_message is not None
+    assert "timed out" in result.error_message
+    assert elapsed < 2.0
+
+
+async def test_keyword_beyond_byte_cap_is_not_read() -> None:
+    keyword = b"needle"
+
+    async def body() -> AsyncIterator[bytes]:
+        yield b"a" * (MAX_KEYWORD_BODY_BYTES // 2)
+        yield b"a" * (MAX_KEYWORD_BODY_BYTES // 2)
+        yield b"a" * (512 * 1024)
+        yield keyword
+        yield b"b" * (512 * 1024 - len(keyword))
+
+    result = await _probe_stream(
+        _ChunkStream(body()),
+        ProbeTarget(url="http://example.test", keyword="needle", check_ssl=False),
+    )
+
+    assert result.ok is False
+    assert result.keyword_matched is False
+
+
+async def test_keyword_inside_the_byte_cap_matches() -> None:
+    async def body() -> AsyncIterator[bytes]:
+        yield b"a" * 128
+        yield b"needle"
+        yield b"a" * (MAX_KEYWORD_BODY_BYTES - 134)
+
+    result = await _probe_stream(
+        _ChunkStream(body()),
+        ProbeTarget(url="http://example.test", keyword="needle", check_ssl=False),
+    )
+
+    assert result.ok is True
+    assert result.keyword_matched is True
+
+
+async def test_keyword_straddling_the_byte_cap_matches() -> None:
+    keyword = b"needle"
+
+    async def body() -> AsyncIterator[bytes]:
+        yield b"a" * (MAX_KEYWORD_BODY_BYTES - 3)
+        yield keyword
+        yield b"b" * 1024
+
+    result = await _probe_stream(
+        _ChunkStream(body()),
+        ProbeTarget(url="http://example.test", keyword="needle", check_ssl=False),
+    )
+
+    assert result.ok is True
+    assert result.keyword_matched is True
+
+
+async def test_keyword_split_across_chunks_matches() -> None:
+    async def body() -> AsyncIterator[bytes]:
+        yield b"status: oper"
+        yield b"ator ready"
+
+    result = await _probe_stream(
+        _ChunkStream(body()),
+        ProbeTarget(url="http://example.test", keyword="operator", check_ssl=False),
+    )
+
+    assert result.ok is True
+    assert result.keyword_matched is True
+
+
+async def test_keyword_matches_a_non_utf8_response() -> None:
+    async def body() -> AsyncIterator[bytes]:
+        yield "café au lait".encode("iso-8859-1")
+
+    result = await _probe_stream(
+        _ChunkStream(body()),
+        ProbeTarget(url="http://example.test", keyword="café", check_ssl=False),
+        headers={"Content-Type": "text/plain; charset=iso-8859-1"},
+    )
+
+    assert result.ok is True
+    assert result.keyword_matched is True
+
+
+async def test_keyword_none_never_reads_the_body() -> None:
+    stream = _RaisingStream()
+
+    result = await _probe_stream(
+        stream,
+        ProbeTarget(url="http://example.test", check_ssl=False),
+    )
+
+    assert result.ok is True
+    assert result.status_code == 200
+    assert result.keyword_matched is None
+    assert stream.iterated is False
+
+
+async def test_status_mismatch_never_reads_the_body() -> None:
+    stream = _RaisingStream()
+
+    result = await _probe_stream(
+        stream,
+        ProbeTarget(
+            url="http://example.test",
+            expected_status_code=204,
+            keyword="operator",
+            check_ssl=False,
+        ),
+        status_code=500,
+    )
+
+    assert result.ok is False
+    assert result.status_code == 500
+    assert result.keyword_matched is None
+    assert stream.iterated is False
+
+
+async def test_response_time_excludes_the_body_read() -> None:
+    async def body() -> AsyncIterator[bytes]:
+        yield b"first"
+        await asyncio.sleep(0.3)
+        yield b"second"
+
+    result = await _probe_stream(
+        _ChunkStream(body()),
+        ProbeTarget(url="http://example.test", keyword="absent", check_ssl=False),
+    )
+
+    assert result.keyword_matched is False
+    assert result.response_time_ms is not None
+    assert result.response_time_ms < 250
 
 
 async def test_timeout_returns_null_status_code_and_message() -> None:

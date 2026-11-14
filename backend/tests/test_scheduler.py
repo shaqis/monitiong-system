@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -154,13 +155,17 @@ async def test_monitor_changed_during_probe_is_ignored(
     session_factory,
     create_monitor,
     test_settings,
+    caplog,
 ) -> None:
     await create_monitor()
 
     scheduler = Scheduler(ChangedRunner(), session_factory, test_settings)
 
-    assert await scheduler.run_once() == 0
+    with caplog.at_level(logging.ERROR):
+        assert await scheduler.run_once() == 0
+
     assert await _check_total(session_factory) == 0
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
 
 
 async def test_loop_wakes_before_the_poll_for_a_retry(
