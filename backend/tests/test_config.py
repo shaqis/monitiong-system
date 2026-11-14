@@ -7,6 +7,7 @@ from app.core.security import hash_password, verify_password
 
 def test_settings_accept_explicit_values(monkeypatch) -> None:
     monkeypatch.delenv("CORS_ORIGINS", raising=False)
+    monkeypatch.delenv("SCHEDULER_ENABLED", raising=False)
     settings = Settings(
         database_url="postgresql+asyncpg://user:pass@localhost:5432/uptime",
         first_admin_email="admin@example.com",

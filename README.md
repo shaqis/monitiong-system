@@ -22,7 +22,7 @@ docker compose up -d --build
 
 Open the dashboard at http://localhost:3000 and sign in with `FIRST_ADMIN_EMAIL` and `FIRST_ADMIN_PASSWORD`. Swagger UI is at http://localhost:8000/docs. The OpenAPI document is at http://localhost:8000/openapi.json. PostgreSQL listens on localhost:5432. If a port is taken, change `FRONTEND_PORT`, `BACKEND_PORT`, or `POSTGRES_PORT` in `.env`.
 
-If you change `FRONTEND_PORT`, set `CORS_ORIGINS` to match the new browser origin, for example `CORS_ORIGINS=["http://localhost:3001"]`. The Next.js server reaches the API through the Compose network with `API_INTERNAL_URL`; the browser uses `NEXT_PUBLIC_API_URL`.
+If you change `FRONTEND_PORT`, set `CORS_ORIGINS` to exactly match the new browser origin, for example `CORS_ORIGINS=["http://localhost:3001"]`. The Next.js server reaches the API through the Compose network with `API_INTERNAL_URL`; the browser uses `NEXT_PUBLIC_API_URL`. The frontend and API must share the cookie host, because the server forwards the auth cookie.
 
 If you change `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` after the first start, run `docker compose down -v` before starting again. The database volume keeps the old credentials.
 

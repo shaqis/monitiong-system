@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth-context";
-import { getOptionalUser } from "@/lib/server-session";
+import { getSessionUser } from "@/lib/server-session";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +15,7 @@ export const metadata: Metadata = {
 };
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
-  const user = await getOptionalUser();
+  const user = await getSessionUser();
 
   return (
     <html lang="en">

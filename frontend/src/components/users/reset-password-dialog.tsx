@@ -52,7 +52,7 @@ export function ResetPasswordDialog({
     setError(null);
 
     const bytes = passwordByteLength(password);
-    if (bytes < 8) {
+    if (password.length < 8) {
       setError("Password must be at least 8 characters.");
       return;
     }
@@ -109,6 +109,9 @@ export function ResetPasswordDialog({
               disabled={saving}
               autoComplete="new-password"
             />
+            <p className="text-xs text-muted-foreground">
+              At least 8 characters and at most 72 bytes.
+            </p>
           </div>
 
           <div className="space-y-2">

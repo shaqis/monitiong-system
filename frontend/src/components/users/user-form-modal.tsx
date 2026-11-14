@@ -80,7 +80,7 @@ export function UserFormModal({ open, onOpenChange, onCreated }: UserFormModalPr
       nextErrors.fullName = "Full name must be at most 120 characters.";
     }
     const passwordBytes = passwordByteLength(form.password);
-    if (passwordBytes < 8) {
+    if (form.password.length < 8) {
       nextErrors.password = "Password must be at least 8 characters.";
     } else if (passwordBytes > 72) {
       nextErrors.password = "Password must be at most 72 bytes.";
@@ -180,7 +180,9 @@ export function UserFormModal({ open, onOpenChange, onCreated }: UserFormModalPr
               disabled={saving}
               autoComplete="new-password"
             />
-            <p className="text-xs text-muted-foreground">8 characters minimum, 72 bytes maximum.</p>
+            <p className="text-xs text-muted-foreground">
+              At least 8 characters and at most 72 bytes.
+            </p>
             {errors.password ? <p className="text-xs text-red-600">{errors.password}</p> : null}
           </div>
 

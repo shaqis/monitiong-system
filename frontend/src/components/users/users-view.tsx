@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   KeyRound,
@@ -65,6 +65,10 @@ export function UsersView({ initialUsers, currentUser }: UsersViewProps) {
   const [resetTarget, setResetTarget] = useState<User | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  useEffect(() => {
+    setUsers(initialUsers);
+  }, [initialUsers]);
 
   function refresh() {
     startTransition(() => {

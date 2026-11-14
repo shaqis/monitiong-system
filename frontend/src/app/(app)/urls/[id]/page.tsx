@@ -8,7 +8,7 @@ import { IncidentTimeline } from "@/components/monitors/incident-timeline";
 import { MonitorActions } from "@/components/monitors/monitor-actions";
 import { StatusBadge } from "@/components/monitors/status-badge";
 import { UptimeMeter } from "@/components/monitors/uptime-meter";
-import { ApiError, getDashboardSummary, getMonitor, getMonitorChecks } from "@/lib/api";
+import { ApiError, getMonitor, getMonitorChecks } from "@/lib/api";
 import {
   formatDateTime,
   formatInterval,
@@ -46,18 +46,19 @@ export default async function MonitorDetailPage({ params }: MonitorDetailPagePro
   try {
     monitor = await getMonitor(params.id, { cookieHeader });
   } catch (error) {
-    if (error instanceof ApiError && error.status === 404) {
+    if (error instanceof ApiError && [400, 404, 422].includes(error.status)) {
       notFound();
     }
     throw error;
   }
 
-  const [checks, summary] = await Promise.all([
-    getMonitorChecks(params.id, { range: "24h", limit: 25, offset: 0 }, { cookieHeader }),
-    getDashboardSummary("30d", { cookieHeader }),
-  ]);
+  const checks = await getMonitorChecks(
+    params.id,
+    { range: "24h", limit: 25, offset: 0 },
+    { cookieHeader },
+  );
 
-  const incidents = summary.incidents.filter((incident) => incident.monitor_id === monitor.id);
+  const incidents = monitor.recent_incidents;
   const isAdmin = user.role === "admin";
 
   const uptimeStats = [

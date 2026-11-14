@@ -1,26 +1,12 @@
-import { redirect } from "next/navigation";
-import { ApiError, getCurrentUser } from "@/lib/api";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
-import { getCookieHeader, getRequiredUser } from "@/lib/server-session";
+import { getRequiredUser } from "@/lib/server-session";
+import type { User } from "@/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  const cookieHeader = getCookieHeader();
-  if (!cookieHeader) {
-    redirect("/login");
-  }
-
-  let user;
-  try {
-    user = await getRequiredUser();
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 401) {
-      redirect("/login");
-    }
-    throw error;
-  }
+  const user: User = await getRequiredUser();
 
   const isAdmin = user.role === "admin";
 

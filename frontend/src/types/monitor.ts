@@ -33,9 +33,18 @@ export interface MonitorListItem extends Monitor {
   last_response_time_ms: number | null;
 }
 
+export interface MonitorIncident {
+  id: string;
+  cause: string;
+  started_at: string;
+  resolved_at: string | null;
+  duration_seconds: number;
+}
+
 export interface MonitorDetail extends MonitorListItem {
   uptime_7d: number | null;
   uptime_30d: number | null;
+  recent_incidents: MonitorIncident[];
 }
 
 export interface MonitorCreateInput {

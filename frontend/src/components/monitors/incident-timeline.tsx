@@ -2,10 +2,10 @@ import { CheckCircle2, Clock } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { formatDateTime, formatDuration } from "@/lib/format";
-import type { IncidentSummary } from "@/types";
+import type { MonitorIncident } from "@/types";
 
 interface IncidentTimelineProps {
-  incidents: IncidentSummary[];
+  incidents: MonitorIncident[];
 }
 
 export function IncidentTimeline({ incidents }: IncidentTimelineProps) {

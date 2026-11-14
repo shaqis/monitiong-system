@@ -6,29 +6,25 @@ import type { User } from "@/types";
 
 export const getCookieHeader = cache((): string => cookies().toString());
 
-export const getOptionalUser = cache(async (): Promise<User | null> => {
+export const getSessionUser = cache(async (): Promise<User | null> => {
   const cookieHeader = getCookieHeader();
   if (!cookieHeader) {
     return null;
-  }
-  try {
-    return await getCurrentUser({ cookieHeader });
-  } catch {
-    return null;
-  }
-});
-
-export const getRequiredUser = cache(async (): Promise<User> => {
-  const cookieHeader = getCookieHeader();
-  if (!cookieHeader) {
-    redirect("/login");
   }
   try {
     return await getCurrentUser({ cookieHeader });
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
-      redirect("/login");
+      return null;
     }
     throw error;
   }
 });
+
+export async function getRequiredUser(): Promise<User> {
+  const user = await getSessionUser();
+  if (user === null) {
+    redirect("/login");
+  }
+  return user;
+}

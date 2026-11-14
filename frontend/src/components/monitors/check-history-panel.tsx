@@ -46,6 +46,7 @@ export function CheckHistoryPanel({
   const [reloadKey, setReloadKey] = useState(0);
   const initialKey = useRef(`${initialRange}:0`);
   const [loadedKey, setLoadedKey] = useState(initialKey.current);
+  const limit = data.limit;
 
   useEffect(() => {
     const key = `${range}:${offset}`;
@@ -60,7 +61,7 @@ export function CheckHistoryPanel({
 
     getMonitorChecks(
       monitorId,
-      { range, limit: initialData.limit, offset },
+      { range, limit, offset },
       { signal: controller.signal },
     )
       .then((result) => {
@@ -91,7 +92,7 @@ export function CheckHistoryPanel({
       cancelled = true;
       controller.abort();
     };
-  }, [monitorId, range, offset, initialData.limit, loadedKey, reloadKey]);
+  }, [monitorId, range, offset, limit, loadedKey, reloadKey]);
 
   function changeRange(next: TimeRange) {
     if (next === range) {
@@ -101,7 +102,6 @@ export function CheckHistoryPanel({
     setRange(next);
   }
 
-  const limit = data.limit;
   const page = Math.floor(offset / limit) + 1;
   const totalPages = Math.max(1, Math.ceil(data.total / limit));
   const firstRow = data.total === 0 ? 0 : offset + 1;

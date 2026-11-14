@@ -334,6 +334,58 @@ async def test_detail_returns_all_three_uptime_windows(
     assert body["last_response_time_ms"] == 500
 
 
+async def test_detail_returns_monitor_scoped_recent_incidents(
+    client,
+    viewer,
+    create_monitor,
+    session,
+    login,
+) -> None:
+    first = await create_monitor(name="First Monitor")
+    second = await create_monitor(name="Second Monitor")
+    now = datetime.now(UTC)
+    active = Incident(
+        monitor_id=first.id,
+        started_at=now - timedelta(hours=3),
+        cause="Expected 200, got 503",
+    )
+    recently_resolved = Incident(
+        monitor_id=first.id,
+        started_at=now - timedelta(days=2),
+        resolved_at=now - timedelta(days=1, hours=20),
+        cause="Connection timed out",
+    )
+    old_resolved = Incident(
+        monitor_id=first.id,
+        started_at=now - timedelta(days=40),
+        resolved_at=now - timedelta(days=39),
+        cause="DNS resolution failed",
+    )
+    other_monitor = Incident(
+        monitor_id=second.id,
+        started_at=now - timedelta(hours=1),
+        cause="Unexpected status 500",
+    )
+    session.add_all([active, recently_resolved, old_resolved, other_monitor])
+    await session.commit()
+    token = await login(viewer.email, "viewer-password")
+
+    response = await client.get(f"/api/v1/monitors/{first.id}", headers=_auth(token))
+
+    assert response.status_code == 200
+    incidents = response.json()["recent_incidents"]
+    assert [incident["id"] for incident in incidents] == [
+        str(active.id),
+        str(recently_resolved.id),
+    ]
+    assert incidents[0]["resolved_at"] is None
+    assert incidents[0]["duration_seconds"] >= 3 * 3600
+    assert incidents[1]["resolved_at"] is not None
+    assert incidents[1]["duration_seconds"] == 4 * 3600
+    assert str(old_resolved.id) not in {incident["id"] for incident in incidents}
+    assert str(other_monitor.id) not in {incident["id"] for incident in incidents}
+
+
 async def test_patch_keyword_omitted_keeps_and_null_clears(
     client,
     admin,

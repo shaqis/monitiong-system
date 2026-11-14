@@ -13,6 +13,7 @@ export type {
   Monitor,
   MonitorCreateInput,
   MonitorDetail,
+  MonitorIncident,
   MonitorListItem,
   MonitorStatusValue,
   MonitorUpdateInput,
