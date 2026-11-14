@@ -21,7 +21,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8003/api/v1 \
 docker-compose up -d --build
 ```
 
-The run used `docker-compose` v1, which is what the author's machine had installed. With the Compose plugin, use `docker compose up -d --build` with the same environment.
+The run used the standalone `docker-compose` binary, which reports `Docker Compose version 5.6.1` on the author's machine. If the Compose plugin is available, use `docker compose up -d --build` with the same environment.
 
 The table below drops the image, command, and created columns from the `docker-compose ps -a` output for width.
 
