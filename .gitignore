@@ -6,6 +6,11 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
 node_modules/
 .next/
 .audit/
