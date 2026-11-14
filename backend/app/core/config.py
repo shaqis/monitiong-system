@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import EmailStr, field_validator
+from pydantic import EmailStr, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BCRYPT_MAX_PASSWORD_BYTES = 72
@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60
     auth_cookie_name: str = "access_token"
     cookie_secure: bool = False
+    scheduler_enabled: bool = True
+    scheduler_poll_seconds: int = Field(default=10, ge=1)
+    scheduler_retry_seconds: int = Field(default=5, ge=1)
+    max_concurrent_checks: int = Field(default=20, ge=1)
+    probe_user_agent: str = "UptimeMonitor/1.0"
+    ssl_inspect_timeout_seconds: float = Field(default=5.0, gt=0)
+    db_pool_size: int = Field(default=20, ge=1)
+    db_max_overflow: int = Field(default=10, ge=0)
 
     @field_validator("first_admin_password")
     @classmethod
@@ -42,6 +50,14 @@ class Settings(BaseSettings):
         if len(value.encode("utf-8")) > BCRYPT_MAX_PASSWORD_BYTES:
             raise ValueError("FIRST_ADMIN_PASSWORD must be at most 72 bytes")
         return value
+
+    @model_validator(mode="after")
+    def validate_pool_covers_checks(self) -> "Settings":
+        if self.db_pool_size + self.db_max_overflow < self.max_concurrent_checks:
+            raise ValueError(
+                "DB_POOL_SIZE + DB_MAX_OVERFLOW must be at least MAX_CONCURRENT_CHECKS"
+            )
+        return self
 
 
 @lru_cache

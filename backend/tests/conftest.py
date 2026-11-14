@@ -1,4 +1,6 @@
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
+from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -7,11 +9,24 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.config import Settings, get_settings
 from app.core.security import hash_password
-from app.db.models import Base, User
+from app.db.models import Base, Monitor, User
 from app.db.session import get_db
 from app.main import app
+from app.worker.checker import CheckRunner
+from app.worker.prober import ProbeResult
 
-TEST_SCHEMA = "test_uptime"
+TEST_SCHEMA = f"test_uptime_{os.getpid()}_{uuid4().hex[:8]}"
+
+
+async def _successful_prober(target, **_kwargs) -> ProbeResult:
+    return ProbeResult(
+        ok=True,
+        status_code=200,
+        response_time_ms=10,
+        keyword_matched=None,
+        error_message=None,
+        ssl_days_remaining=None,
+    )
 
 
 @pytest.fixture
@@ -40,6 +55,29 @@ async def test_engine():
 
 
 @pytest.fixture
+def session_factory(test_engine):
+    return async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@pytest.fixture
+def create_monitor(session_factory) -> Callable[..., Awaitable[Monitor]]:
+    async def _create(**overrides) -> Monitor:
+        fields: dict[str, object] = {
+            "name": "Example",
+            "url": "https://example.com",
+        }
+        fields.update(overrides)
+        async with session_factory() as session:
+            monitor = Monitor(**fields)
+            session.add(monitor)
+            await session.commit()
+            await session.refresh(monitor)
+        return monitor
+
+    return _create
+
+
+@pytest.fixture
 async def session(test_engine) -> AsyncSession:
     maker = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -55,6 +93,7 @@ def test_settings() -> Settings:
         first_admin_password="secret",
         first_admin_name="Test Admin",
         jwt_secret="test-secret-that-is-at-least-32-bytes-long",
+        scheduler_enabled=False,
     )
 
 
@@ -68,11 +107,13 @@ async def client(test_engine, test_settings) -> AsyncIterator[AsyncClient]:
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_settings] = lambda: test_settings
+    app.state.check_runner = CheckRunner(maker, prober=_successful_prober)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
+    app.state.check_runner = None
     app.dependency_overrides.clear()
 
 
