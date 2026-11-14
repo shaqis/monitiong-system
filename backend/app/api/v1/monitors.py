@@ -50,6 +50,36 @@ def _not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Monitor not found")
 
 
+async def _resolve_open_incidents(
+    db: AsyncSession,
+    monitor_id: UUID,
+    resolved_at: datetime,
+) -> None:
+    """Close every open incident for one monitor at a single timestamp."""
+    await db.execute(
+        update(Incident)
+        .where(
+            and_(
+                Incident.monitor_id == monitor_id,
+                Incident.resolved_at.is_(None),
+            )
+        )
+        .values(resolved_at=resolved_at)
+    )
+
+
+async def _reset_target_state(
+    db: AsyncSession,
+    monitor: Monitor,
+    resolved_at: datetime,
+) -> None:
+    """Restart the check cycle after the probed target changed."""
+    monitor.current_status = "PENDING"
+    monitor.consecutive_failures = 0
+    monitor.last_checked_at = None
+    await _resolve_open_incidents(db, monitor.id, resolved_at)
+
+
 def _percent(up: int, total: int) -> float | None:
     if not total:
         return None
@@ -252,31 +282,10 @@ async def update_monitor(
         setattr(monitor, field, getattr(validated, field))
 
     if target_changed:
-        monitor.current_status = "PENDING"
-        monitor.consecutive_failures = 0
-        monitor.last_checked_at = None
-        await db.execute(
-            update(Incident)
-            .where(
-                and_(
-                    Incident.monitor_id == monitor_id,
-                    Incident.resolved_at.is_(None),
-                )
-            )
-            .values(resolved_at=datetime.now(UTC))
-        )
+        await _reset_target_state(db, monitor, datetime.now(UTC))
 
     if payload.is_active is False:
-        await db.execute(
-            update(Incident)
-            .where(
-                and_(
-                    Incident.monitor_id == monitor_id,
-                    Incident.resolved_at.is_(None),
-                )
-            )
-            .values(resolved_at=datetime.now(UTC))
-        )
+        await _resolve_open_incidents(db, monitor.id, datetime.now(UTC))
 
     await db.commit()
     await db.refresh(monitor)
