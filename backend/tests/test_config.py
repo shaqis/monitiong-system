@@ -155,3 +155,23 @@ def test_password_helpers_reject_input_over_bcrypt_limit() -> None:
 def test_verify_password_rejects_malformed_hash() -> None:
     assert not verify_password("secret", "not-a-hash")
     assert not verify_password("secret", "$2b$12$invalid")
+
+
+def test_settings_reject_wildcard_cors_origin() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(cors_origins=["*"])
+
+    assert "wildcard" in str(exc_info.value)
+
+
+def test_settings_reject_insecure_cookie_for_public_origin() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(cookie_secure=False, cors_origins=["https://monitor.example.com"])
+
+    assert "COOKIE_SECURE" in str(exc_info.value)
+
+
+def test_settings_allow_insecure_cookie_for_loopback_origin() -> None:
+    settings = build_settings(cookie_secure=False, cors_origins=["http://127.0.0.1:3000"])
+
+    assert settings.cookie_secure is False

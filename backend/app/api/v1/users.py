@@ -126,10 +126,7 @@ async def update_user(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Email already registered",
             ) from None
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Update conflicts with existing data",
-        ) from None
+        raise
 
     await db.refresh(user)
     return user

@@ -34,6 +34,9 @@ def verify_password(password: str, hashed_password: str) -> bool:
     try:
         return _password_hash.verify(password, hashed_password)
     except (UnknownHashError, ValueError):
+        # UnknownHashError covers an unrecognized format. bcrypt raises a bare
+        # ValueError for a recognized prefix with a corrupt salt or digest, so
+        # both must fail closed instead of surfacing a 500.
         return False
 
 

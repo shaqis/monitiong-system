@@ -39,7 +39,11 @@ Run exactly one `backend` service. The scheduler and the per-monitor check locks
 
 Logout clears the auth cookie only. A bearer token stays valid until it expires. Resetting a user's password invalidates every token issued before the reset.
 
-`COOKIE_SECURE` defaults to `true`. Set it to `false` only for local HTTP development, as `.env.example` does.
+Tokens minted before token versioning, which carry no `ver` claim, stay valid for a user who never resets a password. To force every session to sign in again, run `UPDATE users SET token_version = token_version + 1;`.
+
+`COOKIE_SECURE` defaults to `true`. Set it to `false` only for local HTTP development, as `.env.example` does. Startup rejects `false` when any `CORS_ORIGINS` entry is not a loopback origin, so a deployment that copies the template to a real domain fails instead of issuing a plaintext cookie.
+
+User creation and password reset require at least 12 characters, the same floor as `FIRST_ADMIN_PASSWORD`.
 
 Monitor creation is admin-only. The prober follows redirects and does not block private address ranges, so an admin can point a monitor at an internal service or a public URL that redirects to one. Treat admin access as trust.
 

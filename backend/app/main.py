@@ -1,11 +1,14 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.v1 import auth, dashboard, monitors, users
 from app.core.config import get_settings
+from app.core.errors import public_errors
 from app.db.seed import seed_first_admin
 from app.db.session import SessionLocal
 from app.worker.checker import CheckRunner
@@ -41,6 +44,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Uptime Monitor API", lifespan=lifespan)
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(
+        _: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={"detail": public_errors(exc)},
+        )
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
