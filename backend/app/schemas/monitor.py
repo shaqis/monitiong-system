@@ -108,9 +108,18 @@ class MonitorListItem(MonitorResponse):
     last_response_time_ms: int | None = None
 
 
+class MonitorIncident(BaseModel):
+    id: UUID
+    cause: str
+    started_at: datetime
+    resolved_at: datetime | None
+    duration_seconds: int
+
+
 class MonitorDetailResponse(MonitorListItem):
     uptime_7d: float | None = None
     uptime_30d: float | None = None
+    recent_incidents: list[MonitorIncident] = Field(default_factory=list)
 
 
 class CheckResponse(BaseModel):

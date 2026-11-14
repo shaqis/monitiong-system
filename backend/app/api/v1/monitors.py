@@ -18,6 +18,7 @@ from app.schemas.monitor import (
     LatencyPoint,
     MonitorCreate,
     MonitorDetailResponse,
+    MonitorIncident,
     MonitorListItem,
     MonitorResponse,
     MonitorUpdate,
@@ -199,6 +200,38 @@ async def get_monitor(
         .order_by(MonitorCheck.checked_at.desc())
         .limit(1)
     )
+
+    since = now - timedelta(days=30)
+    incident_rows = list(
+        (
+            await db.scalars(
+                select(Incident)
+                .where(
+                    Incident.monitor_id == monitor.id,
+                    or_(
+                        Incident.resolved_at.is_(None),
+                        Incident.resolved_at >= since,
+                        Incident.started_at >= since,
+                    ),
+                )
+                .order_by(Incident.started_at.desc())
+                .limit(20)
+            )
+        ).all()
+    )
+    detail.recent_incidents = [
+        MonitorIncident(
+            id=incident.id,
+            cause=incident.cause,
+            started_at=incident.started_at,
+            resolved_at=incident.resolved_at,
+            duration_seconds=max(
+                0,
+                int(((incident.resolved_at or now) - incident.started_at).total_seconds()),
+            ),
+        )
+        for incident in incident_rows
+    ]
     return detail
 
 

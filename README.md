@@ -1,6 +1,6 @@
 # Uptime Monitor
 
-Self-hosted uptime monitoring for URLs. The stack is a FastAPI backend with PostgreSQL and, from Phase 4, a Next.js frontend.
+Self-hosted uptime monitoring for URLs. The stack is a FastAPI backend with PostgreSQL and a Next.js frontend.
 
 ## Requirements
 
@@ -20,13 +20,20 @@ Set `FIRST_ADMIN_PASSWORD` and `JWT_SECRET` in `.env`, then start the stack. The
 docker compose up -d --build
 ```
 
-Swagger UI is at http://localhost:8000/docs. The OpenAPI document is at http://localhost:8000/openapi.json. PostgreSQL listens on localhost:5432. Both ports bind to localhost only. If a port is taken, change `BACKEND_PORT` or `POSTGRES_PORT` in `.env`.
+Open the dashboard at http://localhost:3000 and sign in with `FIRST_ADMIN_EMAIL` and `FIRST_ADMIN_PASSWORD`. Swagger UI is at http://localhost:8000/docs. The OpenAPI document is at http://localhost:8000/openapi.json. PostgreSQL listens on localhost:5432. If a port is taken, change `FRONTEND_PORT`, `BACKEND_PORT`, or `POSTGRES_PORT` in `.env`.
+
+If you change `FRONTEND_PORT`, set `CORS_ORIGINS` to exactly match the new browser origin, for example `CORS_ORIGINS=["http://localhost:3001"]`. The Next.js server reaches the API through the Compose network with `API_INTERNAL_URL`; the browser uses `NEXT_PUBLIC_API_URL`. The frontend and API must share the cookie host, because the server forwards the auth cookie.
 
 If you change `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` after the first start, run `docker compose down -v` before starting again. The database volume keeps the old credentials.
 
 ## One backend process
 
 Run exactly one `backend` service. The scheduler and the per-monitor check locks are process-local, so a second backend replica would probe every monitor twice. Docker Compose starts one backend process; scale PostgreSQL, not the API replicas.
+
+## Roles
+
+- `admin`: manages users and creates, edits, pauses, deletes, and checks URLs.
+- `viewer`: reads the dashboard, URL directory, URL details, and incidents. The UI hides mutation controls and redirects `/users` to `/dashboard`; the API also returns `403` for admin-only calls.
 
 ## Verify
 
@@ -40,11 +47,19 @@ docker compose exec backend ruff format --check .
 docker compose exec backend pytest -v
 ```
 
+Frontend checks:
+
+```bash
+docker compose exec frontend npx tsc --noEmit
+docker compose exec frontend npm run lint
+docker compose exec frontend npm run build
+```
+
 ## Layout
 
 ```text
 backend/     FastAPI application, worker, and migrations
-frontend/    Next.js dashboard (Phase 4)
+frontend/    Next.js App Router dashboard
 ```
 
 Implementation follows the phases in `PRD.md` and the matching GitHub issues.
