@@ -1,6 +1,8 @@
 # Phase 5 end-to-end verification
 
-This run proves the full stack works through the browser and the worker. It covers both roles, the two-strike failure rule, incident recovery, dashboard accuracy, every admin mutation, and the delete cascade. Every number below comes from a command or a database query recorded in this document.
+This run proves the stack works through the browser and the worker. It covers both roles, the two-strike failure rule, incident recovery, dashboard accuracy, every admin mutation, and the delete cascade. Every number below comes from a command, a database query, or a screenshot shown in this document.
+
+Coverage boundaries. All three scenario targets use `http://`, so this run does not exercise the SSL inspection path. It also does not cover a failed login, the last-admin guardrail, or a scheduler restart. Those are outside the Phase 5 scope in issue #6.
 
 - Date: 2026-11-14 16:00 to 16:13 UTC.
 - Base: `main` at `859453e`, the merge of Phase 4.
@@ -19,11 +21,15 @@ NEXT_PUBLIC_API_URL=http://localhost:8003/api/v1 \
 docker-compose up -d --build
 ```
 
+The run used `docker-compose` v1, which is what the author's machine had installed. With the Compose plugin, use `docker compose up -d --build` with the same environment.
+
+The table below drops the image, command, and created columns from the `docker-compose ps -a` output for width.
+
 ```text
-NAME                SERVICE    STATUS
-phase5-backend-1    backend    Up (healthy)      127.0.0.1:8003->8000/tcp
-phase5-db-1         db         Up (healthy)      127.0.0.1:5435->5432/tcp
-phase5-frontend-1   frontend   Up (healthy)      127.0.0.1:3002->3000/tcp
+NAME                SERVICE    STATUS             PORTS
+phase5-backend-1    backend    Up (healthy)       127.0.0.1:8003->8000/tcp
+phase5-db-1         db         Up (healthy)       127.0.0.1:5435->5432/tcp
+phase5-frontend-1   frontend   Up (healthy)       127.0.0.1:3002->3000/tcp
 phase5-migrate-1    migrate    Exited (0)
 ```
 
@@ -37,7 +43,7 @@ This pull request adds a healthcheck to the `frontend` service so all three serv
 
 ## Scenario monitors
 
-The admin created all three monitors through the Add URL dialog in the browser. The defaults supplied method `GET`, interval 60 seconds, timeout 10 seconds, and expected status 200.
+The admin created all three monitors through the Add URL dialog in the browser. The automated session filled the name, target URL, and keyword fields, then submitted the form. The resulting list is in the first screenshot below. The defaults supplied method `GET`, interval 60 seconds, timeout 10 seconds, and expected status 200.
 
 | Name | URL | Keyword | Purpose |
 | --- | --- | --- | --- |
@@ -64,7 +70,7 @@ A database poller sampled every monitor every 500 milliseconds while the schedul
 | 16:03:45 | Phase 5 Unreachable | DOWN | 2 | 2 | 1 | 1 |
 | 16:03:46 | Phase 5 Keyword Missing | DOWN | 2 | 2 | 1 | 1 |
 
-Both failure monitors stayed `DEGRADED` after the first failure with zero incidents. Each reached `DOWN` only on the second failure, and each opened exactly one incident. Later failures increased `consecutive_failures` to 4 without opening another incident.
+Both failure monitors stayed `DEGRADED` after the first failure with zero incidents. Each reached `DOWN` only on the second failure, and each opened exactly one incident. A SQL snapshot at 16:05, after the recovery check, showed the unreachable monitor at 4 checks and `consecutive_failures = 4` with still one incident.
 
 The check rows show the two failure causes.
 
@@ -96,7 +102,7 @@ The target body was changed to contain `PAYMENT ENABLED`, then a check ran. The 
 | `resolved_at` | `2026-11-14 16:05:31.281838+00` |
 | Incident duration | 105 seconds |
 
-The detail page shows `UP`, four checks, and the incident marked `Resolved` with a resolved timestamp.
+The detail page shows `UP` and the incident marked `Resolved` with a resolved timestamp. The screenshot was captured after the 16:05 database sample, so its check history lists five checks.
 
 ![Recovered keyword monitor with a resolved incident](phase-5/09-admin-detail-keyword-recovered.png)
 
@@ -146,13 +152,13 @@ All four ranges returned data.
 | 7d | 2 | 2 | 0 | 82.35% | 1 | 1 |
 | 30d | 2 | 2 | 0 | 82.35% | 1 | 1 |
 
-The values drift as new checks land. The final screenshot at 16:12 shows 85.00% uptime and 30 ms average because more successful checks had arrived. The incident feed, status bars, and per-monitor values still agree with the database.
+The values drift as new checks land. The range comparison was captured at 16:09 UTC. The final dashboard screenshots were captured at 16:12, after more successful checks arrived, so they show 85.00% uptime and 30 ms average. The incident feed, status bars, and per-monitor values still agree with the database structure captured at 16:09.
 
 ![Final dashboard for 24 hours](phase-5/24-admin-dashboard-final-24h.png)
 
 ![Dashboard for 7 days](phase-5/25-admin-dashboard-7d.png)
 
-![Dashboard for 30 days](phase-5/25-admin-dashboard-30d.png)
+![Dashboard for 30 days](phase-5/26-admin-dashboard-30d.png)
 
 ## Viewer access
 
@@ -166,6 +172,7 @@ A viewer account was created from the Users page, then used in a fresh browser c
 | `/urls` row action buttons | 0 |
 | Monitor detail mutation buttons | 0 |
 | `/users` | Redirects to `/dashboard` |
+| Browser URL after `/users` | `http://localhost:3002/dashboard` |
 | `/users` Create user buttons after redirect | 0 |
 | Users nav links in the sidebar | 0 |
 | `POST /api/v1/monitors` with the viewer token | 403, `Admin access required` |
@@ -184,6 +191,8 @@ A viewer account was created from the Users page, then used in a fresh browser c
 ![Viewer monitor detail without mutation buttons](phase-5/22-viewer-detail.png)
 
 ![Viewer redirected from /users to /dashboard](phase-5/23-viewer-users-redirect.png)
+
+The automated viewer session navigated to `/users` and then read the page URL. It was `http://localhost:3002/dashboard`, and the page contained no Create user button and no Users nav link.
 
 ## Admin mutations
 
@@ -215,6 +224,14 @@ Each action ran from the browser against the live stack.
 
 The unreachable monitor was deleted from the browser. Counts were taken immediately before and after.
 
+```sql
+select count(*) from monitors where name = 'Phase 5 Unreachable';
+select count(*) from monitor_checks c
+  join monitors m on m.id = c.monitor_id where m.name = 'Phase 5 Unreachable';
+select count(*) from incidents i
+  join monitors m on m.id = i.monitor_id where m.name = 'Phase 5 Unreachable';
+```
+
 | Row | Before | After |
 | --- | --- | --- |
 | Monitor | 1 | 0 |
@@ -237,7 +254,7 @@ select count(*) from incidents i left join monitors m on m.id = i.monitor_id whe
 | `backend ruff format --check .` | `42 files already formatted` |
 | `frontend npx tsc --noEmit` | exit 0, no diagnostics |
 | `frontend npm run lint` | `No ESLint warnings or errors` |
-| `frontend npm run build` | compiled successfully, 8 of 8 static pages, 7 dynamic routes |
+| `frontend npm run build` | compiled successfully, 8 of 8 static pages, every route marked dynamic (`ƒ`) |
 
 ## Final state
 
