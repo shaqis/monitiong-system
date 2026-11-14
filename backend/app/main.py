@@ -4,10 +4,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1 import auth, users
+from app.api.v1 import auth, dashboard, monitors, users
 from app.core.config import get_settings
 from app.db.seed import seed_first_admin
 from app.db.session import SessionLocal
+from app.worker.checker import CheckRunner
+from app.worker.scheduler import Scheduler
 
 
 @asynccontextmanager
@@ -15,7 +17,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     async with SessionLocal() as session:
         await seed_first_admin(session, settings)
-    yield
+
+    runner = CheckRunner(
+        SessionLocal,
+        max_concurrent_checks=settings.max_concurrent_checks,
+        user_agent=settings.probe_user_agent,
+        ssl_inspect_timeout_seconds=settings.ssl_inspect_timeout_seconds,
+    )
+    scheduler = Scheduler(runner, SessionLocal, settings)
+    app.state.check_runner = runner
+    app.state.scheduler = scheduler
+
+    if settings.scheduler_enabled:
+        scheduler.start()
+
+    try:
+        yield
+    finally:
+        await scheduler.stop()
 
 
 def create_app() -> FastAPI:
@@ -30,6 +49,8 @@ def create_app() -> FastAPI:
     )
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
     app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
+    app.include_router(monitors.router, prefix="/api/v1/monitors", tags=["monitors"])
+    app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"])
     return app
 
 

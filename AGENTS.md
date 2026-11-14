@@ -8,9 +8,10 @@ This document defines mandatory architectural rules, coding conventions, and ver
 
 1. **Follow `PRD.md` Strictly**: Do not invent unrequested features, alter database column names, or change API route paths defined in `PRD.md`.
 2. **Sequential Phase Execution**: Implement the system strictly in the order defined in **Section 9 (Phased Implementation Plan)** of `PRD.md`. Do not start Frontend work until Backend APIs and pytest suites pass.
-3. **Inspect Before Editing**: Always inspect existing directory structure, config files, and schemas before creating or modifying files.
-4. **Zero Placeholders**: Never leave `TODO` comments, stubbed functions, hardcoded mock data, or skipped tests in completed phases.
-5. **Verify Every Change**: After completing each module or phase, run the relevant linter, type checker, and test suite before moving on.
+3. **Close the Ticket Honestly**: Before starting the next phase, check off every acceptance criterion on the completed phase issue and confirm the merged PR closed it. An unchecked criterion blocks the next phase or moves to a tracked follow-up issue.
+4. **Inspect Before Editing**: Always inspect existing directory structure, config files, and schemas before creating or modifying files.
+5. **Zero Placeholders**: Never leave `TODO` comments, stubbed functions, hardcoded mock data, or skipped tests in completed phases.
+6. **Verify Every Change**: After completing each module or phase, run the relevant linter, type checker, and test suite before moving on.
 
 ---
 
