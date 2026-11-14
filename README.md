@@ -5,27 +5,31 @@ Self-hosted uptime monitoring for URLs. The stack is a FastAPI backend with Post
 ## Requirements
 
 - Docker with the Compose plugin
-- Ports 8000 and 5432 free
 
 ## Setup
 
-Copy the environment template, then start the database and the API.
+Copy the environment template, then build the backend, start the database, apply migrations, and start the API.
 
 ```bash
 cp .env.example .env
-docker compose up -d --build
+docker compose build backend
+docker compose up -d db
+docker compose run --rm backend alembic upgrade head
+docker compose up -d
 ```
 
-The API serves its OpenAPI document at http://localhost:8000/docs. PostgreSQL listens on localhost:5432.
+Swagger UI is at http://localhost:8000/docs. The OpenAPI document is at http://localhost:8000/openapi.json. PostgreSQL listens on localhost:5432. Both ports bind to localhost only. If a port is taken, change `BACKEND_PORT` or `POSTGRES_PORT` in `.env`.
+
+If you change `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` after the first start, run `docker compose down -v` before starting again. The database volume keeps the old credentials.
 
 ## Verify
 
 ```bash
 docker compose config
 docker compose ps
-docker compose run --rm backend python -c "import fastapi, sqlalchemy, alembic, httpx, apscheduler"
-docker compose run --rm backend ruff check .
-docker compose run --rm backend pytest -v
+docker compose exec backend alembic current
+docker compose exec backend ruff check .
+docker compose exec backend pytest -v
 ```
 
 ## Layout
