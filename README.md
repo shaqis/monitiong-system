@@ -14,7 +14,7 @@ Copy the environment template and set the admin password and JWT secret.
 cp .env.example .env
 ```
 
-Set `FIRST_ADMIN_PASSWORD` and `JWT_SECRET` in `.env`, then start the stack. The `migrate` service applies the schema before the API starts.
+Set `FIRST_ADMIN_PASSWORD` and `JWT_SECRET` in `.env`, then start the stack. The `migrate` service applies the schema before the API starts. `FIRST_ADMIN_PASSWORD` must be at least 12 characters and `JWT_SECRET` at least 32 bytes. Startup rejects the documented placeholder values and does not echo the secret in the error.
 
 ```bash
 docker compose up -d --build
@@ -34,6 +34,12 @@ Run exactly one `backend` service. The scheduler and the per-monitor check locks
 
 - `admin`: manages users and creates, edits, pauses, deletes, and checks URLs.
 - `viewer`: reads the dashboard, URL directory, URL details, and incidents. The UI hides mutation controls and redirects `/users` to `/dashboard`; the API also returns `403` for admin-only calls.
+
+## Security notes
+
+Logout clears the auth cookie only. A bearer token stays valid until it expires. Resetting a user's password invalidates every token issued before the reset.
+
+`COOKIE_SECURE` defaults to `true`. Set it to `false` only for local HTTP development, as `.env.example` does.
 
 ## Verify
 

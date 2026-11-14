@@ -1,3 +1,6 @@
+from datetime import UTC, datetime, timedelta
+
+import jwt
 from httpx import AsyncClient
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -137,3 +140,169 @@ async def test_logout_clears_cookie(client: AsyncClient, create_user, login) -> 
 
     assert logout_response.status_code == 204
     assert me_response.status_code == 401
+
+
+async def test_login_rejects_malformed_stored_hash(
+    client: AsyncClient,
+    create_user,
+    db_session: AsyncSession,
+) -> None:
+    user = await create_user(email="broken@example.com", password="password123")
+    await db_session.execute(
+        update(User).where(User.id == user.id).values(hashed_password="not-a-valid-hash")
+    )
+    await db_session.commit()
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "broken@example.com", "password": "password123"},
+    )
+
+    assert response.status_code == 401
+
+
+async def test_me_rejects_expired_token(
+    client: AsyncClient,
+    create_user,
+    test_settings,
+) -> None:
+    user = await create_user(email="expired@example.com")
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "iat": now - timedelta(hours=2),
+            "exp": now - timedelta(hours=1),
+            "ver": 0,
+        },
+        test_settings.jwt_secret,
+        algorithm=test_settings.jwt_algorithm,
+    )
+
+    response = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
+async def test_me_rejects_token_missing_required_claim(
+    client: AsyncClient,
+    create_user,
+    test_settings,
+) -> None:
+    user = await create_user(email="claims@example.com")
+    now = datetime.now(UTC)
+    payload = {
+        "sub": str(user.id),
+        "iat": now,
+        "exp": now + timedelta(minutes=5),
+        "ver": 0,
+    }
+    payload.pop("exp")
+    token = jwt.encode(
+        payload,
+        test_settings.jwt_secret,
+        algorithm=test_settings.jwt_algorithm,
+    )
+
+    response = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
+async def test_me_rejects_token_signed_with_another_algorithm(
+    client: AsyncClient,
+    create_user,
+    test_settings,
+) -> None:
+    user = await create_user(email="algorithm@example.com")
+    now = datetime.now(UTC)
+    token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "iat": now,
+            "exp": now + timedelta(minutes=5),
+            "ver": 0,
+        },
+        test_settings.jwt_secret,
+        algorithm="HS512",
+    )
+
+    response = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
+async def test_me_rejects_stale_token_version(
+    client: AsyncClient,
+    create_user,
+    login,
+    db_session: AsyncSession,
+) -> None:
+    user = await create_user(email="stale@example.com", password="password123")
+    token = await login("stale@example.com", "password123")
+
+    await db_session.execute(update(User).where(User.id == user.id).values(token_version=1))
+    await db_session.commit()
+    client.cookies.clear()
+
+    response = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
+async def test_bearer_takes_precedence_over_cookie(
+    client: AsyncClient,
+    create_user,
+    login,
+) -> None:
+    await create_user(
+        email="admin@example.com",
+        password="admin-password",
+        role="admin",
+    )
+    await create_user(email="viewer@example.com", password="viewer-password")
+    admin_token = await login("admin@example.com", "admin-password")
+    await login("viewer@example.com", "viewer-password")
+
+    admin_response = await client.get(
+        "/api/v1/users",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    invalid_bearer_response = await client.get(
+        "/api/v1/users",
+        headers={"Authorization": "Bearer not-a-token"},
+    )
+
+    assert admin_response.status_code == 200
+    assert invalid_bearer_response.status_code == 401
+
+
+async def test_logout_does_not_revoke_bearer_token(
+    client: AsyncClient,
+    create_user,
+    login,
+) -> None:
+    await create_user(email="logout@example.com", password="password123")
+    token = await login("logout@example.com", "password123")
+
+    logout_response = await client.post("/api/v1/auth/logout")
+    client.cookies.clear()
+    me_response = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert logout_response.status_code == 204
+    assert me_response.status_code == 200

@@ -36,6 +36,7 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(20), server_default=text("'viewer'"))
     is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    token_version: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

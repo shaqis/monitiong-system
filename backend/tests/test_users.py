@@ -1,7 +1,11 @@
+import asyncio
 from uuid import uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+
+from app.db.models import User
 
 
 @pytest.fixture
@@ -329,3 +333,88 @@ async def test_second_active_admin_can_demote_first(
 
     assert response.status_code == 200
     assert response.json()["role"] == "viewer"
+
+
+async def test_create_rejects_case_variant_duplicate_email(
+    client: AsyncClient,
+    admin,
+    login,
+) -> None:
+    await login(admin.email, "admin-password")
+    payload = {
+        "full_name": "Case User",
+        "password": "case-password",
+    }
+
+    first = await client.post(
+        "/api/v1/users",
+        json={"email": "CaseUser@Example.com", **payload},
+    )
+    second = await client.post(
+        "/api/v1/users",
+        json={"email": "caseuser@example.com", **payload},
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+
+
+async def test_password_reset_revokes_existing_tokens(
+    client: AsyncClient,
+    admin,
+    viewer,
+    login,
+) -> None:
+    viewer_token = await login(viewer.email, "viewer-password")
+    admin_token = await login(admin.email, "admin-password")
+    client.cookies.clear()
+
+    reset_response = await client.patch(
+        f"/api/v1/users/{viewer.id}",
+        json={"password": "updated-password"},
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    stale_response = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {viewer_token}"},
+    )
+    new_login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": viewer.email, "password": "updated-password"},
+    )
+
+    assert reset_response.status_code == 200
+    assert stale_response.status_code == 401
+    assert new_login.status_code == 200
+
+
+async def test_concurrent_patch_cannot_remove_last_admin(
+    client: AsyncClient,
+    create_user,
+    login,
+    db_session,
+) -> None:
+    first = await create_user(
+        email="first-admin@example.com",
+        password="first-password",
+        role="admin",
+    )
+    second = await create_user(
+        email="second-admin@example.com",
+        password="second-password",
+        role="admin",
+    )
+    await login("first-admin@example.com", "first-password")
+
+    responses = await asyncio.gather(
+        client.patch(f"/api/v1/users/{first.id}", json={"role": "viewer"}),
+        client.patch(f"/api/v1/users/{second.id}", json={"role": "viewer"}),
+    )
+
+    statuses = sorted(response.status_code for response in responses)
+    active_admins = (
+        await db_session.scalars(select(User).where(User.role == "admin", User.is_active.is_(True)))
+    ).all()
+
+    assert statuses == [200, 403]
+    assert len(active_admins) == 1

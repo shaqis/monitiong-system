@@ -90,10 +90,11 @@ def test_settings() -> Settings:
     return Settings(
         database_url="postgresql+asyncpg://uptime:uptime@db:5432/uptime",
         first_admin_email="admin@example.com",
-        first_admin_password="secret",
+        first_admin_password="test-admin-password",
         first_admin_name="Test Admin",
-        jwt_secret="test-secret-that-is-at-least-32-bytes-long",
+        jwt_secret="test-secret-that-is-long-enough-for-hs512-signing-and-at-least-32-bytes",
         scheduler_enabled=False,
+        cookie_secure=False,
     )
 
 
