@@ -31,7 +31,7 @@ class User(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str] = mapped_column(String(120))
     hashed_password: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(20), server_default=text("'viewer'"))
@@ -154,3 +154,6 @@ class Incident(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cause: Mapped[str] = mapped_column(Text)
+
+
+Index("ix_users_email_lower", func.lower(User.email), unique=True)
