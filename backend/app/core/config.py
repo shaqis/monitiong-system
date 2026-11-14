@@ -6,7 +6,7 @@ from pydantic import EmailStr, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BCRYPT_MAX_PASSWORD_BYTES = 72
-MIN_ADMIN_PASSWORD_LENGTH = 12
+MIN_PASSWORD_LENGTH = 12
 MIN_JWT_SECRET_LENGTH = 32
 
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -83,9 +83,9 @@ class Settings(BaseSettings):
     def validate_first_admin_password(cls, value: str) -> str:
         if len(value.encode("utf-8")) > BCRYPT_MAX_PASSWORD_BYTES:
             raise ValueError("FIRST_ADMIN_PASSWORD must be at most 72 bytes")
-        if len(value) < MIN_ADMIN_PASSWORD_LENGTH:
+        if len(value) < MIN_PASSWORD_LENGTH:
             raise ValueError(
-                f"FIRST_ADMIN_PASSWORD must be at least {MIN_ADMIN_PASSWORD_LENGTH} characters"
+                f"FIRST_ADMIN_PASSWORD must be at least {MIN_PASSWORD_LENGTH} characters"
             )
         if value.strip().lower() in PLACEHOLDER_ADMIN_PASSWORDS:
             raise ValueError("FIRST_ADMIN_PASSWORD must not be a documented placeholder")
@@ -114,12 +114,15 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_cookie_secure(self) -> "Settings":
         # A plaintext cookie is acceptable only against a loopback frontend.
-        # Anything reachable over a network needs the Secure attribute.
-        if not self.cookie_secure and not all(
+        # An empty origin list matches the reverse-proxy shape and gets no
+        # exemption: all([]) is true, so it would otherwise skip the check.
+        loopback_only = bool(self.cors_origins) and all(
             _is_loopback_origin(origin) for origin in self.cors_origins
-        ):
+        )
+        if not self.cookie_secure and not loopback_only:
             raise ValueError(
-                "COOKIE_SECURE must be true unless every CORS_ORIGINS entry is a loopback origin"
+                "COOKIE_SECURE must be true unless CORS_ORIGINS lists at least one "
+                "loopback origin and no other origin"
             )
         return self
 

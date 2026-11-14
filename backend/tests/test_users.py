@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 from uuid import uuid4
 
 import pytest
@@ -444,6 +445,17 @@ async def test_create_validation_does_not_echo_the_password(
     assert all("input" not in error and "ctx" not in error for error in response.json()["detail"])
 
 
+async def test_patch_cannot_change_the_email(client: AsyncClient, admin, login) -> None:
+    await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        f"/api/v1/users/{admin.id}",
+        json={"email": "other@example.com"},
+    )
+
+    assert response.status_code == 422
+
+
 async def test_is_unique_violation_matches_only_unique_sqlstates(session_factory) -> None:
     async with session_factory() as session:
         session.add(
@@ -512,15 +524,28 @@ async def test_patch_waits_for_the_admin_guard_lock(
         waiting = 0
         for _ in range(100):
             waiting = await watcher.scalar(
-                text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+                text(
+                    "SELECT count(*) FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND NOT granted "
+                    "AND classid = ((hashtext(:name)::bigint >> 32) & 4294967295)::oid "
+                    "AND objid = (hashtext(:name)::bigint & 4294967295)::oid"
+                ),
+                {"name": ADMIN_GUARD_LOCK},
             )
             if waiting:
                 break
             await asyncio.sleep(0.05)
 
-        assert waiting, "the PATCH never waited on the advisory lock"
-        assert not request.done()
-        await holder.rollback()
+        try:
+            assert waiting, "the PATCH never waited on the admin guard lock"
+            assert not request.done()
+        except BaseException:
+            request.cancel()
+            with suppress(asyncio.CancelledError):
+                await request
+            raise
+        finally:
+            await holder.rollback()
 
     response = await asyncio.wait_for(request, timeout=5)
 

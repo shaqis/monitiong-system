@@ -57,6 +57,20 @@ async def test_login_rejects_unknown_email(client: AsyncClient) -> None:
     assert response.status_code == 401
 
 
+async def test_login_validation_hides_the_submitted_value(client: AsyncClient) -> None:
+    password = "secret-login-password"
+
+    response = await client.post(
+        "/api/v1/auth/login",
+        json={"email": "not-an-email", "password": password},
+    )
+
+    assert response.status_code == 422
+    assert password not in response.text
+    assert "not-an-email" not in response.text
+    assert all("input" not in error and "ctx" not in error for error in response.json()["detail"])
+
+
 async def test_login_rejects_inactive_user(client: AsyncClient, create_user) -> None:
     await create_user(
         email="inactive@example.com",

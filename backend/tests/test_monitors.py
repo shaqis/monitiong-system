@@ -508,6 +508,22 @@ async def test_patch_validates_merged_result(client, admin, login, payload) -> N
     assert response.status_code == 422
 
 
+async def test_patch_validation_hides_the_submitted_value(client, admin, login) -> None:
+    token = await login(admin.email, "admin-password")
+    created = await _create(client, token)
+    rejected = "ftp://internal-host.example"
+
+    response = await client.patch(
+        f"/api/v1/monitors/{created['id']}",
+        json={"url": rejected},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 422
+    assert rejected not in response.text
+    assert all("input" not in error and "ctx" not in error for error in response.json()["detail"])
+
+
 async def test_unknown_monitors_return_not_found(client, admin, login) -> None:
     token = await login(admin.email, "admin-password")
     missing = uuid4()
