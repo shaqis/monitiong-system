@@ -7,15 +7,14 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.analytics import latency_bucket, to_latency_point
 from app.core.deps import get_current_user, require_admin
 from app.db.models import Incident, Monitor, MonitorCheck, User
 from app.db.session import get_db
 from app.schemas.monitor import (
-    RANGE_BUCKET_SECONDS,
     RANGE_SECONDS,
     CheckHistoryResponse,
     CheckResponse,
-    LatencyPoint,
     MonitorCreate,
     MonitorDetailResponse,
     MonitorIncident,
@@ -100,21 +99,6 @@ async def _latest_latency_map(
     for monitor_id, response_time_ms in rows:
         latencies[monitor_id] = response_time_ms
     return latencies
-
-
-def _latency_bucket(time_range: TimeRange):
-    return func.date_bin(
-        func.make_interval(0, 0, 0, 0, 0, 0, RANGE_BUCKET_SECONDS[time_range]),
-        MonitorCheck.checked_at,
-        func.to_timestamp(0),
-    ).label("bucket")
-
-
-def _to_latency_point(bucket: datetime, average: float | None) -> LatencyPoint:
-    return LatencyPoint(
-        bucket=bucket,
-        avg_response_time_ms=round(float(average), 2) if average is not None else None,
-    )
 
 
 @router.get("", response_model=list[MonitorListItem])
@@ -282,6 +266,18 @@ async def update_monitor(
             .values(resolved_at=datetime.now(UTC))
         )
 
+    if payload.is_active is False:
+        await db.execute(
+            update(Incident)
+            .where(
+                and_(
+                    Incident.monitor_id == monitor_id,
+                    Incident.resolved_at.is_(None),
+                )
+            )
+            .values(resolved_at=datetime.now(UTC))
+        )
+
     await db.commit()
     await db.refresh(monitor)
     return monitor
@@ -292,6 +288,7 @@ async def delete_monitor(
     monitor_id: UUID,
     _: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
+    runner: CheckRunner = Depends(get_check_runner),
 ) -> None:
     monitor = await db.get(Monitor, monitor_id)
     if monitor is None:
@@ -299,6 +296,7 @@ async def delete_monitor(
 
     await db.delete(monitor)
     await db.commit()
+    runner.forget(monitor_id)
 
 
 @router.post(
@@ -364,14 +362,14 @@ async def list_monitor_checks(
         ).all()
     )
 
-    bucket = _latency_bucket(time_range)
+    bucket = latency_bucket(time_range)
     rows = await db.execute(
         select(bucket, func.avg(MonitorCheck.response_time_ms))
         .where(window, MonitorCheck.response_time_ms.is_not(None))
         .group_by(bucket)
         .order_by(bucket)
     )
-    series = [_to_latency_point(row_bucket, average) for row_bucket, average in rows]
+    series = [to_latency_point(row_bucket, average) for row_bucket, average in rows]
 
     return CheckHistoryResponse(
         items=[CheckResponse.model_validate(item) for item in items],

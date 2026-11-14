@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Incident, Monitor, MonitorCheck
@@ -13,6 +13,7 @@ from app.worker.prober import (
     DEFAULT_USER_AGENT,
     ProbeResult,
     ProbeTarget,
+    create_ssl_executor,
     probe,
 )
 from app.worker.state import MonitorState, apply_probe_result
@@ -73,6 +74,7 @@ class CheckRunner:
         self._session_factory = session_factory
         self._prober = prober
         self._semaphore = asyncio.Semaphore(max_concurrent_checks)
+        self._ssl_executor = create_ssl_executor(max_concurrent_checks)
         self._locks: dict[UUID, asyncio.Lock] = {}
         self._user_agent = user_agent
         self._ssl_inspect_timeout_seconds = ssl_inspect_timeout_seconds
@@ -84,35 +86,34 @@ class CheckRunner:
             self._locks[monitor_id] = lock
         return lock
 
-    async def run(self, monitor_id: UUID, *, require_active: bool = True) -> MonitorCheck:
+    def forget(self, monitor_id: UUID) -> None:
+        """Drop the per-monitor lock once a deleted monitor cannot be running."""
+        lock = self._locks.get(monitor_id)
+        if lock is None:
+            return
+        if not lock.locked():
+            self._locks.pop(monitor_id, None)
+
+    def aclose(self) -> None:
+        self._ssl_executor.shutdown(wait=False, cancel_futures=True)
+
+    async def run(self, monitor_id: UUID) -> MonitorCheck:
         lock = self._lock_for(monitor_id)
         if lock.locked():
             raise CheckAlreadyRunning(str(monitor_id))
 
         async with lock:
-            target, snapshot = await self._load_target(
-                monitor_id,
-                require_active=require_active,
-            )
+            target, snapshot = await self._load_target(monitor_id)
             async with self._semaphore:
                 result = await self._prober(
                     target,
                     user_agent=self._user_agent,
                     ssl_inspect_timeout_seconds=self._ssl_inspect_timeout_seconds,
+                    ssl_executor=self._ssl_executor,
                 )
-            return await self._record(
-                monitor_id,
-                snapshot,
-                result,
-                require_active=require_active,
-            )
+            return await self._record(monitor_id, snapshot, result)
 
-    async def _load_target(
-        self,
-        monitor_id: UUID,
-        *,
-        require_active: bool,
-    ) -> tuple[ProbeTarget, TargetSnapshot]:
+    async def _load_target(self, monitor_id: UUID) -> tuple[ProbeTarget, TargetSnapshot]:
         async with self._session_factory() as session:
             row = (
                 await session.execute(
@@ -130,7 +131,7 @@ class CheckRunner:
 
         if row is None:
             raise MonitorNotFound(str(monitor_id))
-        if require_active and not row.is_active:
+        if not row.is_active:
             raise MonitorPaused(str(monitor_id))
 
         target = ProbeTarget(
@@ -154,8 +155,6 @@ class CheckRunner:
         monitor_id: UUID,
         snapshot: TargetSnapshot,
         result: ProbeResult,
-        *,
-        require_active: bool,
     ) -> MonitorCheck:
         checked_at = datetime.now(UTC)
         async with self._session_factory() as session:
@@ -165,28 +164,26 @@ class CheckRunner:
                 )
                 if monitor is None:
                     raise MonitorNotFound(str(monitor_id))
-                if require_active and not monitor.is_active:
+                if not monitor.is_active:
                     raise MonitorPaused(str(monitor_id))
                 if any(
                     getattr(monitor, field) != getattr(snapshot, field) for field in TARGET_FIELDS
                 ):
                     raise MonitorChanged(str(monitor_id))
 
-                open_incident = await session.scalar(
-                    select(Incident)
+                open_incident_id = await session.scalar(
+                    select(Incident.id)
                     .where(
                         Incident.monitor_id == monitor_id,
                         Incident.resolved_at.is_(None),
                     )
-                    .order_by(Incident.started_at.desc())
                     .limit(1)
                 )
 
                 transition = apply_probe_result(
                     MonitorState(
-                        current_status=monitor.current_status,
                         consecutive_failures=monitor.consecutive_failures,
-                        has_open_incident=open_incident is not None,
+                        has_open_incident=open_incident_id is not None,
                     ),
                     result.ok,
                 )
@@ -216,8 +213,15 @@ class CheckRunner:
                             cause=result.error_message or "Check failed",
                         )
                     )
-                elif transition.resolve_incident and open_incident is not None:
-                    open_incident.resolved_at = checked_at
+                elif transition.resolve_incident:
+                    await session.execute(
+                        update(Incident)
+                        .where(
+                            Incident.monitor_id == monitor_id,
+                            Incident.resolved_at.is_(None),
+                        )
+                        .values(resolved_at=checked_at)
+                    )
 
             await session.refresh(check)
 

@@ -4,6 +4,7 @@ import functools
 import socket
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlparse
@@ -24,6 +25,19 @@ SECONDS_PER_DAY = 86400
 def _ssl_context() -> ssl.SSLContext:
     """Build the trust-store-backed SSL context on first inspection."""
     return ssl.create_default_context()
+
+
+def create_ssl_executor(max_workers: int) -> ThreadPoolExecutor:
+    """Dedicated pool so certificate inspection cannot queue behind checks.
+
+    The default executor can be as small as five threads. With twenty
+    concurrent checks, extra inspections would wait inside the probe timeout
+    and silently return ``None``.
+    """
+    return ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="ssl-inspect",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,12 +157,15 @@ def inspect_ssl_days(
         return None
 
 
-async def _ssl_days_remaining(url: str, timeout_seconds: float) -> int | None:
+async def _ssl_days_remaining(
+    url: str,
+    timeout_seconds: float,
+    executor: ThreadPoolExecutor | None = None,
+) -> int | None:
     try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(inspect_ssl_days, url, timeout_seconds),
-            timeout=timeout_seconds + 1.0,
-        )
+        loop = asyncio.get_running_loop()
+        inspection = loop.run_in_executor(executor, inspect_ssl_days, url, timeout_seconds)
+        return await asyncio.wait_for(inspection, timeout=timeout_seconds + 1.0)
     except Exception:
         return None
 
@@ -158,11 +175,15 @@ async def _execute(
     target: ProbeTarget,
     user_agent: str,
     ssl_inspect_timeout_seconds: float,
+    ssl_executor: ThreadPoolExecutor | None,
 ) -> ProbeResult:
     started_at = time.perf_counter()
     try:
         # The wall-clock budget covers redirects, headers, and the body read.
         async with asyncio.timeout(target.timeout_seconds):
+            # Redirects are followed because http-to-https redirects are common.
+            # Targets are admin supplied, and blocking private ranges is an
+            # accepted SSRF risk documented in the README.
             async with client.stream(
                 target.http_method.upper(),
                 target.url,
@@ -203,7 +224,11 @@ async def _execute(
 
     ssl_days_remaining: int | None = None
     if target.check_ssl and final_url.startswith("https://"):
-        ssl_days_remaining = await _ssl_days_remaining(final_url, ssl_inspect_timeout_seconds)
+        ssl_days_remaining = await _ssl_days_remaining(
+            final_url,
+            ssl_inspect_timeout_seconds,
+            ssl_executor,
+        )
 
     return ProbeResult(
         ok=status_ok and keyword_matched is not False,
@@ -221,14 +246,27 @@ async def probe(
     client: httpx.AsyncClient | None = None,
     user_agent: str = DEFAULT_USER_AGENT,
     ssl_inspect_timeout_seconds: float = DEFAULT_SSL_INSPECT_TIMEOUT_SECONDS,
+    ssl_executor: ThreadPoolExecutor | None = None,
 ) -> ProbeResult:
     """Probe one target. Network failures are reported, never raised."""
     if client is not None:
-        return await _execute(client, target, user_agent, ssl_inspect_timeout_seconds)
+        return await _execute(
+            client,
+            target,
+            user_agent,
+            ssl_inspect_timeout_seconds,
+            ssl_executor,
+        )
 
     async with httpx.AsyncClient(
         follow_redirects=True,
         verify=True,
         timeout=target.timeout_seconds,
     ) as owned_client:
-        return await _execute(owned_client, target, user_agent, ssl_inspect_timeout_seconds)
+        return await _execute(
+            owned_client,
+            target,
+            user_agent,
+            ssl_inspect_timeout_seconds,
+            ssl_executor,
+        )

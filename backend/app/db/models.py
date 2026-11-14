@@ -122,6 +122,7 @@ class MonitorCheck(Base):
             "ix_monitor_checks_monitor_id_checked_at",
             "monitor_id",
             text("checked_at DESC"),
+            postgresql_include=["status"],
         ),
     )
 
@@ -142,6 +143,14 @@ class MonitorCheck(Base):
 
 class Incident(Base):
     __tablename__ = "incidents"
+    __table_args__ = (
+        Index(
+            "uq_incidents_open_monitor",
+            "monitor_id",
+            unique=True,
+            postgresql_where=text("resolved_at IS NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(
         Uuid,

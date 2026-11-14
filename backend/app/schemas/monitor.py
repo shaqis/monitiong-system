@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Annotated, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
@@ -30,12 +30,13 @@ MAX_KEYWORD_LENGTH = 255
 
 
 def _validate_http_url(value: str) -> str:
-    if not value.startswith(("http://", "https://")):
-        raise ValueError("URL must start with http:// or https://")
     parsed = urlparse(value)
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError("URL must start with http:// or https://")
     if not parsed.hostname:
         raise ValueError("URL must include a host")
-    return value
+    return urlunparse(parsed._replace(scheme=scheme))
 
 
 Name = Annotated[
