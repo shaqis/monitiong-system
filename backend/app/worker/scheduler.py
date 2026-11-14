@@ -42,7 +42,6 @@ class Scheduler:
         self._runner = runner
         self._session_factory = session_factory
         self._settings = settings
-        self._semaphore = asyncio.Semaphore(settings.max_concurrent_checks)
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
 
@@ -80,15 +79,14 @@ class Scheduler:
         return sum(1 for result in results if result is True)
 
     async def _run_check(self, monitor_id: UUID) -> bool:
-        async with self._semaphore:
-            try:
-                await self._runner.run(monitor_id)
-            except (CheckAlreadyRunning, MonitorChanged, MonitorNotFound, MonitorPaused):
-                return False
-            except Exception:
-                logger.exception("Monitor check failed", extra={"monitor_id": str(monitor_id)})
-                return False
-            return True
+        try:
+            await self._runner.run(monitor_id)
+        except (CheckAlreadyRunning, MonitorChanged, MonitorNotFound, MonitorPaused):
+            return False
+        except Exception:
+            logger.exception("Monitor check failed", extra={"monitor_id": str(monitor_id)})
+            return False
+        return True
 
     def _due_condition(self, now: datetime) -> ColumnElement[bool]:
         return and_(

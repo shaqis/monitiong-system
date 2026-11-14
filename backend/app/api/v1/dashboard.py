@@ -2,19 +2,15 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.analytics import latency_bucket, to_latency_point
 from app.core.deps import get_current_user
 from app.db.models import Incident, Monitor, MonitorCheck, User
 from app.db.session import get_db
 from app.schemas.dashboard import DashboardSummary, IncidentSummary, MonitorStatusStrip
-from app.schemas.monitor import (
-    RANGE_BUCKET_SECONDS,
-    RANGE_SECONDS,
-    LatencyPoint,
-    TimeRange,
-)
+from app.schemas.monitor import RANGE_SECONDS, TimeRange
 
 router = APIRouter()
 
@@ -68,11 +64,7 @@ async def dashboard_summary(
     )
     avg_response_time_ms = round(float(average_latency), 2) if average_latency is not None else None
 
-    bucket = func.date_bin(
-        func.make_interval(0, 0, 0, 0, 0, 0, RANGE_BUCKET_SECONDS[time_range]),
-        MonitorCheck.checked_at,
-        func.to_timestamp(0),
-    ).label("bucket")
+    bucket = latency_bucket(time_range)
     series_rows = await db.execute(
         select(bucket, func.avg(MonitorCheck.response_time_ms))
         .where(
@@ -82,13 +74,7 @@ async def dashboard_summary(
         .group_by(bucket)
         .order_by(bucket),
     )
-    latency_series = [
-        LatencyPoint(
-            bucket=row_bucket,
-            avg_response_time_ms=round(float(average), 2) if average is not None else None,
-        )
-        for row_bucket, average in series_rows
-    ]
+    latency_series = [to_latency_point(row_bucket, average) for row_bucket, average in series_rows]
 
     monitors = list(
         (await db.scalars(select(Monitor).order_by(Monitor.created_at))).all(),
@@ -148,28 +134,21 @@ async def _status_strips(
     statuses: dict[UUID, list[str]] = {monitor.id: [] for monitor in monitors}
     if monitors:
         since = datetime.now(UTC) - timedelta(days=STATUS_STRIP_LOOKBACK_DAYS)
-        ranked = (
-            select(
-                MonitorCheck.monitor_id,
-                MonitorCheck.status,
-                MonitorCheck.checked_at,
-                func.row_number()
-                .over(
-                    partition_by=MonitorCheck.monitor_id,
-                    order_by=MonitorCheck.checked_at.desc(),
-                )
-                .label("position"),
-            )
+        latest_checks = (
+            select(MonitorCheck.status, MonitorCheck.checked_at)
             .where(
-                MonitorCheck.monitor_id.in_([monitor.id for monitor in monitors]),
+                MonitorCheck.monitor_id == Monitor.id,
                 MonitorCheck.checked_at >= since,
             )
-            .subquery()
+            .order_by(MonitorCheck.checked_at.desc())
+            .limit(RECENT_STATUS_COUNT)
+            .lateral("latest_checks")
         )
         rows = await db.execute(
-            select(ranked.c.monitor_id, ranked.c.status)
-            .where(ranked.c.position <= RECENT_STATUS_COUNT)
-            .order_by(ranked.c.monitor_id, ranked.c.checked_at.asc()),
+            select(Monitor.id, latest_checks.c.status)
+            .where(Monitor.id.in_([monitor.id for monitor in monitors]))
+            .join(latest_checks, true())
+            .order_by(Monitor.id, latest_checks.c.checked_at.asc())
         )
         for monitor_id, monitor_status in rows:
             statuses[monitor_id].append(monitor_status)

@@ -813,3 +813,47 @@ async def test_list_handles_whitespace_search(client, viewer, create_monitor, lo
 
     assert response.status_code == 200
     assert len(response.json()) == 1
+
+
+async def test_create_normalizes_an_uppercase_url_scheme(
+    client,
+    admin,
+    login,
+) -> None:
+    await login(admin.email, "admin-password")
+
+    response = await client.post(
+        "/api/v1/monitors",
+        json={"name": "Uppercase Scheme", "url": "HTTPS://Example.COM/health"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["url"] == "https://Example.COM/health"
+
+
+async def test_pausing_a_monitor_resolves_its_open_incident(
+    client,
+    admin,
+    create_monitor,
+    session,
+    login,
+) -> None:
+    monitor = await create_monitor(current_status="DOWN", consecutive_failures=2)
+    incident = Incident(
+        monitor_id=monitor.id,
+        started_at=datetime.now(UTC) - timedelta(minutes=5),
+        cause="Connection failed",
+    )
+    session.add(incident)
+    await session.commit()
+    await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        f"/api/v1/monitors/{monitor.id}",
+        json={"is_active": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["is_active"] is False
+    await session.refresh(incident)
+    assert incident.resolved_at is not None

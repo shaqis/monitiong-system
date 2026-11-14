@@ -1,8 +1,10 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Incident, Monitor, MonitorCheck
 from app.worker.checker import (
@@ -351,3 +353,74 @@ async def test_check_count_is_one_per_run(session_factory, create_monitor) -> No
             .where(MonitorCheck.monitor_id == monitor.id),
         )
     assert total == 2
+
+
+async def test_paused_monitor_is_not_checked(session_factory, create_monitor) -> None:
+    monitor = await create_monitor(is_active=False)
+    runner = CheckRunner(session_factory, SequenceProber([_success()]))
+
+    with pytest.raises(MonitorPaused):
+        await runner.run(monitor.id)
+
+
+async def test_a_second_open_incident_is_rejected(
+    session_factory,
+    create_monitor,
+) -> None:
+    monitor = await create_monitor()
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        session.add(Incident(monitor_id=monitor.id, started_at=now, cause="first"))
+        await session.commit()
+        session.add(Incident(monitor_id=monitor.id, started_at=now, cause="second"))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+
+async def test_recovery_resolves_every_open_incident(
+    session_factory,
+    create_monitor,
+) -> None:
+    monitor = await create_monitor(current_status="DOWN", consecutive_failures=2)
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        await session.execute(text("DROP INDEX uq_incidents_open_monitor"))
+        session.add_all(
+            [
+                Incident(
+                    monitor_id=monitor.id,
+                    started_at=now - timedelta(hours=2),
+                    cause="first",
+                ),
+                Incident(
+                    monitor_id=monitor.id,
+                    started_at=now - timedelta(hours=1),
+                    cause="second",
+                ),
+            ]
+        )
+        await session.commit()
+
+    runner = CheckRunner(session_factory, SequenceProber([_success()]))
+    await runner.run(monitor.id)
+
+    incidents = await _incidents(session_factory, monitor.id)
+    assert len(incidents) == 2
+    assert all(incident.resolved_at is not None for incident in incidents)
+
+
+async def test_forget_drops_the_monitor_lock(
+    session_factory,
+    create_monitor,
+) -> None:
+    monitor = await create_monitor()
+    runner = CheckRunner(session_factory, SequenceProber([_success()]))
+
+    await runner.run(monitor.id)
+    assert monitor.id in runner._locks
+
+    runner.forget(monitor.id)
+    assert monitor.id not in runner._locks

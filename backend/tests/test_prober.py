@@ -493,3 +493,23 @@ def test_inspect_ssl_days_rejects_non_https_url() -> None:
 )
 def test_invalid_urls_are_not_ssl_inspected(url: str) -> None:
     assert inspect_ssl_days(url, 0.1) is None
+
+
+async def test_ssl_executor_keeps_twenty_inspections_within_timeout(monkeypatch) -> None:
+    def slow_inspect(url: str, timeout_seconds: float) -> int | None:
+        time.sleep(0.2)
+        return 30
+
+    monkeypatch.setattr(prober, "inspect_ssl_days", slow_inspect)
+    executor = prober.create_ssl_executor(20)
+    try:
+        started_at = time.perf_counter()
+        results = await asyncio.gather(
+            *[prober._ssl_days_remaining("https://example.test", 0.5, executor) for _ in range(20)]
+        )
+        elapsed = time.perf_counter() - started_at
+    finally:
+        executor.shutdown(wait=True)
+
+    assert results == [30] * 20
+    assert elapsed < 1.0

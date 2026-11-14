@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await scheduler.stop()
+        runner.aclose()
 
 
 def create_app() -> FastAPI:

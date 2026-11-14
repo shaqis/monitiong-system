@@ -5,13 +5,11 @@ STATUS_DOWN = "DOWN"
 STATUS_DEGRADED = "DEGRADED"
 STATUS_PENDING = "PENDING"
 
-FIRST_FAILURE_RETRY_SECONDS = 5
 INCIDENT_OPEN_FAILURE_COUNT = 2
 
 
 @dataclass(frozen=True, slots=True)
 class MonitorState:
-    current_status: str
     consecutive_failures: int
     has_open_incident: bool
 
@@ -20,18 +18,20 @@ class MonitorState:
 class Transition:
     current_status: str
     consecutive_failures: int
-    retry_in_seconds: int | None
     open_incident: bool
     resolve_incident: bool
 
 
 def apply_probe_result(state: MonitorState, ok: bool) -> Transition:
-    """Pure reducer for the two-strike rule in PRD section 6.5."""
+    """Pure reducer for the two-strike rule in PRD section 6.5.
+
+    The retry delay is owned by ``SCHEDULER_RETRY_SECONDS``. The reducer only
+    decides status and incident transitions.
+    """
     if ok:
         return Transition(
             current_status=STATUS_UP,
             consecutive_failures=0,
-            retry_in_seconds=None,
             open_incident=False,
             resolve_incident=state.has_open_incident,
         )
@@ -41,7 +41,6 @@ def apply_probe_result(state: MonitorState, ok: bool) -> Transition:
         return Transition(
             current_status=STATUS_DEGRADED,
             consecutive_failures=failures,
-            retry_in_seconds=FIRST_FAILURE_RETRY_SECONDS,
             open_incident=False,
             resolve_incident=False,
         )
@@ -49,7 +48,6 @@ def apply_probe_result(state: MonitorState, ok: bool) -> Transition:
     return Transition(
         current_status=STATUS_DOWN,
         consecutive_failures=failures,
-        retry_in_seconds=None,
         open_incident=not state.has_open_incident,
         resolve_incident=False,
     )

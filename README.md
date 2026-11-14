@@ -41,6 +41,10 @@ Logout clears the auth cookie only. A bearer token stays valid until it expires.
 
 `COOKIE_SECURE` defaults to `true`. Set it to `false` only for local HTTP development, as `.env.example` does.
 
+Monitor creation is admin-only. The prober follows redirects and does not block private address ranges, so an admin can point a monitor at an internal service or a public URL that redirects to one. Treat admin access as trust.
+
+Pausing a monitor closes its open incident at the pause time. Resuming starts a fresh check cycle, and a new failure opens a new incident.
+
 ## Verify
 
 ```bash
