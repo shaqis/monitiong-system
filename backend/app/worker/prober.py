@@ -167,6 +167,8 @@ async def _ssl_days_remaining(
         inspection = loop.run_in_executor(executor, inspect_ssl_days, url, timeout_seconds)
         return await asyncio.wait_for(inspection, timeout=timeout_seconds + 1.0)
     except Exception:
+        # Any failure here (shut-down executor, inspection timeout, TLS error)
+        # leaves an otherwise good check recorded with SSL days unknown.
         return None
 
 
