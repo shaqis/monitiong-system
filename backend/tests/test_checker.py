@@ -274,6 +274,43 @@ async def test_concurrent_checks_for_one_monitor_open_one_incident(
     assert stored.consecutive_failures == 1
 
 
+async def test_second_run_is_rejected_while_the_first_waits_for_a_semaphore_slot(
+    session_factory,
+    create_monitor,
+) -> None:
+    holder_monitor = await create_monitor(name="holder")
+    queued_monitor = await create_monitor(name="queued")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def blocking_prober(target: ProbeTarget, **_kwargs) -> ProbeResult:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return _success()
+
+    runner = CheckRunner(session_factory, blocking_prober, max_concurrent_checks=1)
+    holder = asyncio.create_task(runner.run(holder_monitor.id))
+    await started.wait()
+
+    queued = asyncio.create_task(runner.run(queued_monitor.id))
+    await asyncio.sleep(0.05)
+    third = asyncio.create_task(runner.run(queued_monitor.id))
+
+    try:
+        done, _ = await asyncio.wait({third}, timeout=1.0)
+        assert done, "a queued run waited for a semaphore slot instead of being rejected"
+        with pytest.raises(CheckAlreadyRunning):
+            third.result()
+    finally:
+        release.set()
+        await asyncio.gather(holder, queued, third, return_exceptions=True)
+
+    assert calls == 2
+
+
 async def test_ssl_days_remaining_is_replaced_only_when_present(
     session_factory,
     create_monitor,
@@ -382,12 +419,15 @@ async def test_a_second_open_incident_is_rejected(
 async def test_recovery_resolves_every_open_incident(
     session_factory,
     create_monitor,
+    open_incident_index_ddl,
 ) -> None:
     monitor = await create_monitor(current_status="DOWN", consecutive_failures=2)
     now = datetime.now(UTC)
 
     async with session_factory() as session:
-        await session.execute(text("DROP INDEX uq_incidents_open_monitor"))
+        # Two open incidents need the partial unique index absent. The finally
+        # restores it so later tests still get the arbiter.
+        await session.execute(text("DROP INDEX IF EXISTS uq_incidents_open_monitor"))
         session.add_all(
             [
                 Incident(
@@ -404,26 +444,18 @@ async def test_recovery_resolves_every_open_incident(
         )
         await session.commit()
 
-    runner = CheckRunner(session_factory, SequenceProber([_success()]))
-    await runner.run(monitor.id)
+    try:
+        runner = CheckRunner(session_factory, SequenceProber([_success()]))
+        await runner.run(monitor.id)
 
-    incidents = await _incidents(session_factory, monitor.id)
-    assert len(incidents) == 2
-    assert all(incident.resolved_at is not None for incident in incidents)
-
-
-async def test_forget_drops_the_monitor_lock(
-    session_factory,
-    create_monitor,
-) -> None:
-    monitor = await create_monitor()
-    runner = CheckRunner(session_factory, SequenceProber([_success()]))
-
-    await runner.run(monitor.id)
-    assert monitor.id in runner._locks
-
-    runner.forget(monitor.id)
-    assert monitor.id not in runner._locks
+        incidents = await _incidents(session_factory, monitor.id)
+        assert len(incidents) == 2
+        assert all(incident.resolved_at is not None for incident in incidents)
+    finally:
+        async with session_factory() as restore:
+            await restore.execute(text("DROP INDEX IF EXISTS uq_incidents_open_monitor"))
+            await restore.execute(text(open_incident_index_ddl))
+            await restore.commit()
 
 
 async def test_incident_insert_conflict_keeps_the_check(
@@ -439,20 +471,15 @@ async def test_incident_insert_conflict_keeps_the_check(
     monitor = await create_monitor(current_status="DEGRADED", consecutive_failures=1)
 
     async with session_factory() as setup:
-        await setup.execute(text("DROP INDEX IF EXISTS uq_incidents_open_monitor"))
+        schema = await setup.scalar(text("SELECT quote_ident(current_schema())"))
+        assert schema is not None
         await setup.execute(
             text(
-                "CREATE UNIQUE INDEX uq_incidents_open_monitor "
-                "ON incidents (monitor_id) WHERE resolved_at IS NULL"
-            )
-        )
-        await setup.execute(
-            text(
-                """
-                CREATE FUNCTION open_incident_on_check() RETURNS trigger
+                f"""
+                CREATE FUNCTION {schema}.open_incident_on_check() RETURNS trigger
                 LANGUAGE plpgsql AS $$
                 BEGIN
-                  INSERT INTO incidents (monitor_id, started_at, cause)
+                  INSERT INTO {schema}.incidents (monitor_id, started_at, cause)
                   VALUES (NEW.monitor_id, NEW.checked_at, 'concurrent writer');
                   RETURN NEW;
                 END
@@ -462,8 +489,8 @@ async def test_incident_insert_conflict_keeps_the_check(
         )
         await setup.execute(
             text(
-                "CREATE TRIGGER open_incident_on_check AFTER INSERT ON monitor_checks "
-                "FOR EACH ROW EXECUTE FUNCTION open_incident_on_check()"
+                f"CREATE TRIGGER open_incident_on_check AFTER INSERT ON {schema}.monitor_checks "
+                f"FOR EACH ROW EXECUTE FUNCTION {schema}.open_incident_on_check()"
             )
         )
         await setup.commit()
@@ -474,9 +501,11 @@ async def test_incident_insert_conflict_keeps_the_check(
     finally:
         async with session_factory() as cleanup:
             await cleanup.execute(
-                text("DROP TRIGGER IF EXISTS open_incident_on_check ON monitor_checks")
+                text(f"DROP TRIGGER IF EXISTS open_incident_on_check ON {schema}.monitor_checks")
             )
-            await cleanup.execute(text("DROP FUNCTION IF EXISTS open_incident_on_check()"))
+            await cleanup.execute(
+                text(f"DROP FUNCTION IF EXISTS {schema}.open_incident_on_check()")
+            )
             await cleanup.commit()
 
     checks = await _checks(session_factory, monitor.id)
@@ -505,19 +534,3 @@ async def test_aclose_refuses_new_probe_work(session_factory, create_monitor) ->
 
     with pytest.raises(RuntimeError):
         await runner.run(monitor.id)
-
-
-async def test_forget_keeps_a_lock_that_is_in_use(
-    session_factory,
-    create_monitor,
-) -> None:
-    monitor = await create_monitor()
-    runner = CheckRunner(session_factory, SequenceProber([]))
-
-    lock = runner._lock_for(monitor.id)
-    async with lock:
-        runner.forget(monitor.id)
-        assert monitor.id in runner._locks
-
-    runner.forget(monitor.id)
-    assert monitor.id not in runner._locks

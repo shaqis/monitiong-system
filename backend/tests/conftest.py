@@ -5,17 +5,28 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.schema import CreateIndex
 
 from app.core.config import Settings, get_settings
 from app.core.security import hash_password
-from app.db.models import Base, Monitor, User
+from app.db.models import Base, Incident, Monitor, User
 from app.db.session import get_db
 from app.main import app
 from app.worker.checker import CheckRunner
 from app.worker.prober import ProbeResult
 
 TEST_SCHEMA = f"test_uptime_{os.getpid()}_{uuid4().hex[:8]}"
+OPEN_INCIDENT_INDEX = next(
+    index for index in Incident.__table__.indexes if index.name == "uq_incidents_open_monitor"
+)
+
+
+@pytest.fixture
+def open_incident_index_ddl() -> str:
+    """The model's partial unique index, compiled as DDL for test fixtures."""
+    return str(CreateIndex(OPEN_INCIDENT_INDEX).compile(dialect=postgresql.dialect()))
 
 
 async def _successful_prober(target, **_kwargs) -> ProbeResult:

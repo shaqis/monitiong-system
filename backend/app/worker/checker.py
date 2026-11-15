@@ -31,7 +31,7 @@ TARGET_FIELDS: tuple[str, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class TargetSnapshot:
-    """The four fields in TARGET_FIELDS that were probed, used to reject stale results."""
+    """Target fields captured before the probe, so a mid-flight edit is rejected."""
 
     url: str
     http_method: str
@@ -48,7 +48,7 @@ class MonitorPaused(Exception):
 
 
 class CheckAlreadyRunning(Exception):
-    """A check for this monitor is already in flight."""
+    """A check for this monitor is already in flight or queued in this process."""
 
 
 class MonitorChanged(Exception):
@@ -56,13 +56,13 @@ class MonitorChanged(Exception):
 
 
 class CheckRunner:
-    """Run one probe and persist its check plus monitor transition.
+    """Probe once, then write the check and the monitor transition atomically.
 
-    One in-process lock per monitor spans the probe and the write. The probe
-    never holds a database connection, and the write is a single short
-    transaction with a row lock. The admission semaphore is taken before the
-    pre-probe read, so a due-monitor fan-out cannot open more sessions than
-    the pool allows.
+    Admission is a synchronous in-flight set taken before the semaphore, so a
+    second caller is rejected even while queued, and a due-monitor fan-out
+    cannot open more sessions than the pool allows. The guarantee stops at the
+    process boundary: a second replica can probe the same monitor, and only
+    the partial unique index keeps one open incident.
     """
 
     def __init__(
@@ -78,47 +78,29 @@ class CheckRunner:
         self._prober = prober
         self._semaphore = asyncio.Semaphore(max_concurrent_checks)
         self._ssl_executor = create_ssl_executor(max_concurrent_checks)
-        self._locks: dict[UUID, asyncio.Lock] = {}
+        self._inflight: set[UUID] = set()
         self._user_agent = user_agent
         self._ssl_inspect_timeout_seconds = ssl_inspect_timeout_seconds
-
-    def _lock_for(self, monitor_id: UUID) -> asyncio.Lock:
-        lock = self._locks.get(monitor_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[monitor_id] = lock
-        return lock
-
-    def forget(self, monitor_id: UUID) -> None:
-        """Drop the per-monitor lock once a deleted monitor cannot be running."""
-        lock = self._locks.get(monitor_id)
-        if lock is None:
-            return
-        if not lock.locked():
-            self._locks.pop(monitor_id, None)
 
     def aclose(self) -> None:
         self._ssl_executor.shutdown(wait=False, cancel_futures=True)
 
     async def run(self, monitor_id: UUID) -> MonitorCheck:
-        lock = self._lock_for(monitor_id)
-        if lock.locked():
+        if monitor_id in self._inflight:
             raise CheckAlreadyRunning(str(monitor_id))
-
+        self._inflight.add(monitor_id)
         try:
             async with self._semaphore:
-                async with lock:
-                    target, snapshot = await self._load_target(monitor_id)
-                    result = await self._prober(
-                        target,
-                        user_agent=self._user_agent,
-                        ssl_inspect_timeout_seconds=self._ssl_inspect_timeout_seconds,
-                        ssl_executor=self._ssl_executor,
-                    )
-                    return await self._record(monitor_id, snapshot, result)
-        except (MonitorNotFound, MonitorPaused):
-            self.forget(monitor_id)
-            raise
+                target, snapshot = await self._load_target(monitor_id)
+                result = await self._prober(
+                    target,
+                    user_agent=self._user_agent,
+                    ssl_inspect_timeout_seconds=self._ssl_inspect_timeout_seconds,
+                    ssl_executor=self._ssl_executor,
+                )
+                return await self._record(monitor_id, snapshot, result)
+        finally:
+            self._inflight.discard(monitor_id)
 
     async def _load_target(self, monitor_id: UUID) -> tuple[ProbeTarget, TargetSnapshot]:
         async with self._session_factory() as session:
@@ -210,6 +192,9 @@ class CheckRunner:
                 monitor.consecutive_failures = transition.consecutive_failures
                 monitor.last_checked_at = checked_at
                 if result.ssl_days_remaining is not None:
+                    # None means "not inspected" (non-HTTPS, check_ssl off, or
+                    # probe failure), not "certificate gone", so keep the last
+                    # known reading.
                     monitor.ssl_days_remaining = result.ssl_days_remaining
 
                 if transition.open_incident:

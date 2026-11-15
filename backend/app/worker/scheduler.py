@@ -28,7 +28,7 @@ def _interval_seconds(value: int) -> ColumnElement[object]:
 class Scheduler:
     """Poll due monitors and run their checks without blocking the loop.
 
-    Single-process only: the scheduler and the per-monitor locks in
+    Single-process only: the scheduler and the in-flight monitor set in
     ``CheckRunner`` are process-local. Running a second backend replica would
     probe every monitor twice, so compose runs one backend process.
     """

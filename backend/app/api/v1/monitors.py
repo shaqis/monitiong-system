@@ -21,10 +21,10 @@ from app.schemas.monitor import (
     MonitorIncident,
     MonitorListItem,
     MonitorResponse,
+    MonitorTarget,
     MonitorUpdate,
     StatusFilter,
     TimeRange,
-    normalize_http_url,
 )
 from app.worker.checker import (
     TARGET_FIELDS,
@@ -80,18 +80,6 @@ async def _reset_target_state(
     monitor.consecutive_failures = 0
     monitor.last_checked_at = None
     await _resolve_open_incidents(db, monitor.id, resolved_at)
-
-
-def _stored_target(monitor: Monitor, field: str) -> object:
-    """The stored target value in the same shape a validated payload has."""
-    value = getattr(monitor, field)
-    if field != "url":
-        return value
-    try:
-        return normalize_http_url(value)
-    except ValueError:
-        # A row written before the validator can hold a URL it rejects.
-        return value
 
 
 def _percent(up: int, total: int) -> float | None:
@@ -276,6 +264,7 @@ async def update_monitor(
     if monitor is None:
         raise _not_found()
 
+    was_active = monitor.is_active
     merged = {field: getattr(monitor, field) for field in MonitorCreate.model_fields}
     for field in payload.model_fields_set:
         merged[field] = getattr(payload, field)
@@ -288,9 +277,17 @@ async def update_monitor(
             detail=public_errors(exc),
         ) from exc
 
-    target_changed = any(
-        getattr(validated, field) != _stored_target(monitor, field) for field in TARGET_FIELDS
-    )
+    try:
+        stored_target = MonitorTarget.model_validate(
+            {field: getattr(monitor, field) for field in MonitorTarget.model_fields}
+        )
+    except ValidationError:
+        # A stored target the current validators reject is being replaced.
+        target_changed = True
+    else:
+        target_changed = any(
+            getattr(validated, field) != getattr(stored_target, field) for field in TARGET_FIELDS
+        )
 
     for field in MonitorCreate.model_fields:
         setattr(monitor, field, getattr(validated, field))
@@ -302,6 +299,10 @@ async def update_monitor(
         # The next cycle starts from zero, so a resume needs two strikes.
         monitor.consecutive_failures = 0
         await _resolve_open_incidents(db, monitor.id, datetime.now(UTC))
+    elif payload.is_active is True and not was_active:
+        # The paused row keeps its old check time, which would delay the next
+        # probe by a full interval. Make the resumed monitor due now.
+        monitor.last_checked_at = None
 
     await db.commit()
     await db.refresh(monitor)
@@ -313,7 +314,6 @@ async def delete_monitor(
     monitor_id: UUID,
     _: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
-    runner: CheckRunner = Depends(get_check_runner),
 ) -> None:
     monitor = await db.get(Monitor, monitor_id)
     if monitor is None:
@@ -321,7 +321,6 @@ async def delete_monitor(
 
     await db.delete(monitor)
     await db.commit()
-    runner.forget(monitor_id)
 
 
 @router.post(

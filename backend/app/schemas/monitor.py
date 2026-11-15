@@ -52,18 +52,22 @@ Keyword = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_KEYWORD_LENGTH),
 ]
+ExpectedStatusCode = Annotated[int, Field(ge=100, le=599)]
 
 
-class MonitorCreate(BaseModel):
+class MonitorTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: Name
     url: HttpUrl
     http_method: HttpMethod = "GET"
+    expected_status_code: ExpectedStatusCode = 200
+    keyword: Keyword | None = None
+
+
+class MonitorCreate(MonitorTarget):
+    name: Name
     interval_seconds: IntervalSeconds = 60
     timeout_seconds: int = Field(default=10, ge=1, le=30)
-    expected_status_code: int = Field(default=200, ge=100, le=599)
-    keyword: Keyword | None = None
     check_ssl: bool = True
     is_active: bool = True
 
@@ -76,7 +80,7 @@ class MonitorUpdate(BaseModel):
     http_method: HttpMethod | None = None
     interval_seconds: IntervalSeconds | None = None
     timeout_seconds: int | None = Field(default=None, ge=1, le=30)
-    expected_status_code: int | None = Field(default=None, ge=100, le=599)
+    expected_status_code: ExpectedStatusCode | None = None
     keyword: Keyword | None = None
     check_ssl: bool | None = None
     is_active: bool | None = None
