@@ -887,7 +887,7 @@ async def _failing_prober(target, **_kwargs) -> ProbeResult:
     )
 
 
-async def test_check_now_unknown_monitor_does_not_keep_a_lock(
+async def test_check_now_unknown_monitor_does_not_keep_it_in_flight(
     client,
     admin,
     login,
@@ -901,10 +901,10 @@ async def test_check_now_unknown_monitor_does_not_keep_a_lock(
     )
 
     assert response.status_code == 404
-    assert missing not in app.state.check_runner._locks
+    assert missing not in app.state.check_runner._inflight
 
 
-async def test_check_now_paused_monitor_does_not_keep_a_lock(
+async def test_check_now_paused_monitor_does_not_keep_it_in_flight(
     client,
     admin,
     login,
@@ -923,7 +923,7 @@ async def test_check_now_paused_monitor_does_not_keep_a_lock(
     )
 
     assert response.status_code == 409
-    assert UUID(created["id"]) not in app.state.check_runner._locks
+    assert UUID(created["id"]) not in app.state.check_runner._inflight
 
 
 async def test_check_now_racing_a_scheduled_tick_records_one_check(
@@ -1015,6 +1015,45 @@ async def test_patch_name_only_keeps_the_cycle_when_the_stored_url_needs_normali
     assert incident.resolved_at is None
 
 
+async def test_patch_name_only_keeps_the_cycle_when_the_stored_keyword_has_whitespace(
+    client,
+    admin,
+    create_monitor,
+    session,
+    login,
+) -> None:
+    monitor = await create_monitor(
+        keyword="  hello  ",
+        current_status="DOWN",
+        consecutive_failures=2,
+        last_checked_at=datetime.now(UTC),
+    )
+    incident = Incident(
+        monitor_id=monitor.id,
+        started_at=datetime.now(UTC) - timedelta(minutes=5),
+        cause="Expected 200, got 503",
+    )
+    session.add(incident)
+    await session.commit()
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        f"/api/v1/monitors/{monitor.id}",
+        json={"name": "Renamed"},
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "Renamed"
+    assert body["keyword"] == "hello"
+    assert body["current_status"] == "DOWN"
+    assert body["consecutive_failures"] == 2
+    assert body["last_checked_at"] is not None
+    await session.refresh(incident)
+    assert incident.resolved_at is None
+
+
 async def test_resume_after_pause_needs_two_strikes_again(
     client,
     admin,
@@ -1059,6 +1098,48 @@ async def test_resume_after_pause_needs_two_strikes_again(
     detail = await client.get(f"/api/v1/monitors/{monitor.id}", headers=_auth(token))
     assert detail.json()["current_status"] == "DEGRADED"
     assert detail.json()["consecutive_failures"] == 1
+    async with session_factory() as incident_session:
+        open_incidents = await incident_session.scalar(
+            select(func.count())
+            .select_from(Incident)
+            .where(Incident.monitor_id == monitor.id, Incident.resolved_at.is_(None))
+        )
+    assert open_incidents == 0
+
+
+async def test_resume_after_pause_is_due_on_the_next_tick(
+    client,
+    admin,
+    create_monitor,
+    session_factory,
+    test_settings,
+    login,
+) -> None:
+    monitor = await create_monitor(
+        is_active=False,
+        current_status="DOWN",
+        consecutive_failures=0,
+        last_checked_at=datetime.now(UTC),
+    )
+    token = await login(admin.email, "admin-password")
+
+    resumed = await client.patch(
+        f"/api/v1/monitors/{monitor.id}",
+        json={"is_active": True},
+        headers=_auth(token),
+    )
+
+    assert resumed.status_code == 200
+    assert resumed.json()["last_checked_at"] is None
+
+    runner = CheckRunner(session_factory, _failing_prober)
+    scheduler = Scheduler(runner, session_factory, test_settings)
+    assert await scheduler.run_once() == 1
+
+    detail = await client.get(f"/api/v1/monitors/{monitor.id}", headers=_auth(token))
+    body = detail.json()
+    assert body["current_status"] == "DEGRADED"
+    assert body["consecutive_failures"] == 1
     async with session_factory() as incident_session:
         open_incidents = await incident_session.scalar(
             select(func.count())
