@@ -117,16 +117,8 @@ async def update_user(
     if payload.is_active is not None:
         user.is_active = payload.is_active
 
-    try:
-        await db.commit()
-    except IntegrityError as exc:
-        await db.rollback()
-        if _is_unique_violation(exc):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Email already registered",
-            ) from None
-        raise
+    # UserUpdate has no email field, so this commit cannot hit the unique email index.
+    await db.commit()
 
     await db.refresh(user)
     return user

@@ -3,8 +3,8 @@ from pydantic import ValidationError
 
 from app.core.config import (
     BCRYPT_MAX_PASSWORD_BYTES,
-    MIN_ADMIN_PASSWORD_LENGTH,
     MIN_JWT_SECRET_LENGTH,
+    MIN_PASSWORD_LENGTH,
     Settings,
 )
 from app.core.security import hash_password, verify_password
@@ -95,7 +95,7 @@ def test_settings_reject_short_admin_password_without_echoing_it() -> None:
         build_settings(first_admin_password=value)
 
     message = str(exc_info.value)
-    assert str(MIN_ADMIN_PASSWORD_LENGTH) in message
+    assert str(MIN_PASSWORD_LENGTH) in message
     assert value not in message
 
 
@@ -167,6 +167,13 @@ def test_settings_reject_wildcard_cors_origin() -> None:
 def test_settings_reject_insecure_cookie_for_public_origin() -> None:
     with pytest.raises(ValidationError) as exc_info:
         build_settings(cookie_secure=False, cors_origins=["https://monitor.example.com"])
+
+    assert "COOKIE_SECURE" in str(exc_info.value)
+
+
+def test_settings_reject_insecure_cookie_without_any_origin() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(cookie_secure=False, cors_origins=[])
 
     assert "COOKIE_SECURE" in str(exc_info.value)
 
