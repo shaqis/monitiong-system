@@ -5,7 +5,7 @@ from typing import Any, Protocol
 import aiosmtplib
 import httpx
 
-from app.core.config import Settings
+from app.core.config import Settings, is_loopback_host
 
 
 class NotificationConfigError(ValueError):
@@ -215,6 +215,16 @@ def build_transport(settings: Settings) -> EmailTransport:
         )
         if (username is None) != (password is None):
             raise NotificationConfigError("SMTP_USERNAME and SMTP_PASSWORD must be set together")
+        if (
+            username is not None
+            and not settings.smtp_starttls
+            and not settings.smtp_ssl
+            and not is_loopback_host(settings.smtp_host)
+        ):
+            raise NotificationConfigError(
+                "SMTP_USERNAME requires SMTP_STARTTLS or SMTP_SSL unless "
+                "SMTP_HOST is a loopback host"
+            )
         return SmtpTransport(
             host=settings.smtp_host,
             port=settings.smtp_port,

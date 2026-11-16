@@ -1,9 +1,10 @@
+import json
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from pydantic import EmailStr, Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BCRYPT_MAX_PASSWORD_BYTES = 72
 MIN_PASSWORD_LENGTH = 12
@@ -32,11 +33,13 @@ JwtAlgorithm = Literal["HS256", "HS384", "HS512"]
 EmailProvider = Literal["smtp", "brevo", "mailgun", "mailtrap"]
 
 
+def is_loopback_host(host: str) -> bool:
+    return host in LOOPBACK_HOSTS or host.endswith(".localhost")
+
+
 def _is_loopback_origin(origin: str) -> bool:
     host = urlparse(origin).hostname
-    if host is None:
-        return False
-    return host in LOOPBACK_HOSTS or host.endswith(".localhost")
+    return host is not None and is_loopback_host(host)
 
 
 class DatabaseSettings(BaseSettings):
@@ -83,7 +86,7 @@ class Settings(BaseSettings):
     email_provider: EmailProvider = "smtp"
     email_from_address: EmailStr | None = None
     email_from_name: str = "Uptime Monitor"
-    notification_recipients: list[EmailStr] = Field(default_factory=list)
+    notification_recipients: Annotated[list[EmailStr], NoDecode] = Field(default_factory=list)
     notification_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
@@ -170,6 +173,22 @@ class Settings(BaseSettings):
             return None
         return value
 
+    @field_validator("notification_recipients", mode="before")
+    @classmethod
+    def parse_notification_recipients(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            if not value.strip():
+                return []
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                raise ValueError(
+                    "NOTIFICATION_RECIPIENTS must be a JSON list of email addresses"
+                ) from None
+        return value
+
     @model_validator(mode="after")
     def validate_email_notifications(self) -> "Settings":
         if not self.email_notifications_enabled:
@@ -192,6 +211,16 @@ class Settings(BaseSettings):
                 raise ValueError("SMTP_STARTTLS and SMTP_SSL cannot both be true")
             if (self.smtp_username is None) != (self.smtp_password is None):
                 raise ValueError("SMTP_USERNAME and SMTP_PASSWORD must be set together")
+            if (
+                self.smtp_username is not None
+                and not self.smtp_starttls
+                and not self.smtp_ssl
+                and not is_loopback_host(self.smtp_host)
+            ):
+                raise ValueError(
+                    "SMTP_USERNAME requires SMTP_STARTTLS or SMTP_SSL unless "
+                    "SMTP_HOST is a loopback host"
+                )
         elif self.email_provider == "brevo":
             if self.brevo_api_key is None:
                 raise ValueError("BREVO_API_KEY is required when EMAIL_PROVIDER is brevo")

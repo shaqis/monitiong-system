@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from html import escape
 from typing import Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 from app.notifications.events import IncidentEvent, IncidentOpened, IncidentResolved
 from app.notifications.transports import EmailTransport, OutboundEmail
@@ -12,6 +13,15 @@ class IncidentNotifier(Protocol):
 
 def _format_utc(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _display_url(url: str) -> str:
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    return urlunsplit(
+        (parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, parts.query, parts.fragment)
+    )
 
 
 def _render_html(title: str, rows: list[tuple[str, str]]) -> str:
@@ -34,7 +44,7 @@ def _render_event(
             title = f"Monitor {event.monitor_name} is down"
             rows = [
                 ("Monitor", event.monitor_name),
-                ("URL", event.monitor_url),
+                ("URL", _display_url(event.monitor_url)),
                 ("Cause", event.cause),
                 ("Opened", _format_utc(event.opened_at)),
             ]
@@ -43,7 +53,7 @@ def _render_event(
             title = f"Monitor {event.monitor_name} recovered"
             rows = [
                 ("Monitor", event.monitor_name),
-                ("URL", event.monitor_url),
+                ("URL", _display_url(event.monitor_url)),
                 ("Started", _format_utc(event.started_at)),
                 ("Resolved", _format_utc(event.resolved_at)),
                 ("Duration", f"{event.duration_seconds} seconds"),

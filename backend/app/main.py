@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -16,6 +17,8 @@ from app.notifications.transports import NotificationConfigError, build_transpor
 from app.worker.checker import CheckRunner
 from app.worker.scheduler import Scheduler
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -26,9 +29,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     transport = None
     try:
         transport = build_transport(settings)
-    except NotificationConfigError:
+    except NotificationConfigError as exc:
         if settings.email_notifications_enabled:
             raise
+        logger.warning("Email notifications are disabled: %s", exc)
 
     notifier = None
     if (
@@ -50,6 +54,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         user_agent=settings.probe_user_agent,
         ssl_inspect_timeout_seconds=settings.ssl_inspect_timeout_seconds,
         notifier=notifier if settings.email_notifications_enabled else None,
+        notification_timeout_seconds=settings.notification_timeout_seconds,
     )
     scheduler = Scheduler(runner, SessionLocal, settings)
     app.state.check_runner = runner

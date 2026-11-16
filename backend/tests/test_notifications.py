@@ -1,10 +1,13 @@
+import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs
 from uuid import uuid4
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
@@ -92,6 +95,33 @@ def test_build_transport_selects_each_provider() -> None:
 def test_build_transport_reports_missing_provider_config() -> None:
     with pytest.raises(NotificationConfigError):
         build_transport(_settings(email_provider="brevo"))
+
+
+def test_build_transport_rejects_cleartext_smtp_auth_on_remote_host() -> None:
+    with pytest.raises(NotificationConfigError):
+        build_transport(
+            _settings(
+                smtp_host="smtp.example.com",
+                smtp_username="smtp-user",
+                smtp_password="smtp-password",
+                smtp_starttls=False,
+                smtp_ssl=False,
+            )
+        )
+
+
+def test_build_transport_allows_cleartext_smtp_auth_on_loopback() -> None:
+    transport = build_transport(
+        _settings(
+            smtp_host="localhost",
+            smtp_username="smtp-user",
+            smtp_password="smtp-password",
+            smtp_starttls=False,
+            smtp_ssl=False,
+        )
+    )
+
+    assert isinstance(transport, SmtpTransport)
 
 
 class RecordingTransport:
@@ -187,6 +217,24 @@ async def test_resolved_event_renders_recovery_and_duration() -> None:
     assert message.subject == "[UP] Production"
     assert "Duration: 125 seconds" in message.text
     assert "Monitor Production recovered" in message.html
+
+
+async def test_event_rendering_strips_url_credentials() -> None:
+    event = IncidentOpened(
+        monitor_id=uuid4(),
+        monitor_name="Production",
+        monitor_url="https://user:pass@example.com/health",
+        cause="Expected 200, got 503",
+        opened_at=datetime(2026, 11, 16, 12, 0, tzinfo=UTC),
+    )
+    transport = RecordingTransport()
+
+    await _service(transport).notify(event)
+
+    message = transport.messages[0]
+    assert "user:pass" not in message.text
+    assert "user:pass" not in message.html
+    assert "https://example.com/health" in message.text
 
 
 async def test_service_requires_at_least_one_recipient() -> None:
@@ -340,7 +388,16 @@ async def test_checker_notifies_once_on_open_and_once_on_resolve(
     assert opened.monitor_name == "Production"
     assert opened.cause == "Expected 200, got 503"
     assert resolved.monitor_url == "https://example.com"
-    assert resolved.duration_seconds >= 0
+
+    async with session_factory() as session:
+        incident = await session.scalar(select(Incident).where(Incident.monitor_id == monitor.id))
+    assert incident is not None
+    assert opened.opened_at == incident.started_at
+    assert resolved.started_at == incident.started_at
+    assert resolved.resolved_at == incident.resolved_at
+    assert resolved.duration_seconds == int(
+        (resolved.resolved_at - incident.started_at).total_seconds()
+    )
 
 
 async def test_checker_stays_silent_on_first_and_repeat_failures(
@@ -359,6 +416,72 @@ async def test_checker_stays_silent_on_first_and_repeat_failures(
         await runner.run(monitor.id)
 
     assert [type(event) for event in notifier.events] == [IncidentOpened]
+
+
+async def test_notification_send_does_not_hold_the_check_slot(
+    session_factory,
+    create_monitor,
+) -> None:
+    incident_monitor = await create_monitor(
+        name="Incident",
+        url="https://incident.example/",
+    )
+    other_monitor = await create_monitor(name="Other", url="https://other.example/")
+    notify_started = asyncio.Event()
+    release_notification = asyncio.Event()
+    other_probed = asyncio.Event()
+
+    class Prober:
+        async def __call__(self, target, **_kwargs) -> ProbeResult:
+            if target.url == incident_monitor.url:
+                return _failure()
+            other_probed.set()
+            return _success()
+
+    class SlowNotifier:
+        async def notify(self, event) -> None:
+            notify_started.set()
+            await release_notification.wait()
+
+    runner = CheckRunner(
+        session_factory,
+        Prober(),
+        max_concurrent_checks=1,
+        notifier=SlowNotifier(),
+    )
+
+    await runner.run(incident_monitor.id)
+    incident_task = asyncio.create_task(runner.run(incident_monitor.id))
+    await asyncio.wait_for(notify_started.wait(), timeout=1)
+
+    other_task = asyncio.create_task(runner.run(other_monitor.id))
+    await asyncio.wait_for(other_probed.wait(), timeout=1)
+
+    release_notification.set()
+    await asyncio.gather(incident_task, other_task)
+
+
+async def test_notification_send_has_a_hard_timeout(
+    session_factory,
+    create_monitor,
+) -> None:
+    monitor = await create_monitor()
+
+    class HangingNotifier:
+        async def notify(self, event) -> None:
+            await asyncio.sleep(5)
+
+    runner = CheckRunner(
+        session_factory,
+        SequenceProber([_failure(), _failure()]),
+        notifier=HangingNotifier(),
+        notification_timeout_seconds=0.05,
+    )
+
+    await runner.run(monitor.id)
+    check = await asyncio.wait_for(runner.run(monitor.id), timeout=1)
+
+    assert check.status == "DOWN"
 
 
 async def test_notification_failure_does_not_block_check_recording(
@@ -487,3 +610,57 @@ async def test_settings_endpoint_rejects_viewer(client, create_user, login) -> N
     )
 
     assert response.status_code == 403
+
+
+class FakeTransport:
+    name = "fake"
+
+    async def send(self, message: OutboundEmail) -> None:
+        pass
+
+
+def _wiring_settings(enabled: bool) -> Settings:
+    return Settings(
+        database_url="postgresql+asyncpg://user:pass@localhost:5432/uptime",
+        first_admin_email="admin@example.com",
+        first_admin_password="test-admin-password",
+        first_admin_name="Admin",
+        jwt_secret="test-secret-that-is-long-enough-for-hs512-signing-and-at-least-32-bytes",
+        scheduler_enabled=False,
+        email_notifications_enabled=enabled,
+        email_from_address="alerts@example.com",
+        notification_recipients=["ops@example.com"],
+        smtp_host="smtp.example.com",
+    )
+
+
+@pytest.mark.parametrize(
+    ("enabled", "runner_has_notifier"),
+    [(True, True), (False, False)],
+)
+def test_lifespan_wires_notifier_from_settings(
+    monkeypatch,
+    enabled: bool,
+    runner_has_notifier: bool,
+) -> None:
+    settings = _wiring_settings(enabled)
+
+    @asynccontextmanager
+    async def fake_session():
+        yield object()
+
+    async def fake_seed(session, settings) -> None:
+        pass
+
+    monkeypatch.setattr("app.main.get_settings", lambda: settings)
+    monkeypatch.setattr("app.main.SessionLocal", fake_session)
+    monkeypatch.setattr("app.main.seed_first_admin", fake_seed)
+    monkeypatch.setattr("app.main.build_transport", lambda _settings: FakeTransport())
+    app.state.notifier = None
+
+    with TestClient(app) as client:
+        assert client.get("/openapi.json").status_code == 200
+        assert app.state.notifier is not None
+        assert (app.state.check_runner._notifier is not None) is runner_has_notifier
+
+    app.state.notifier = None
