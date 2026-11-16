@@ -146,7 +146,7 @@ Provides a high-level operational overview with a global time-range selector (`1
 
 ### 5.5 Email Notifications (Admin, Environment Configured)
 
-Sends an operational email when an incident opens or resolves. This phase adds no database table and no settings UI. Credentials live only in the deployment environment.
+Sends an operational email when an incident opens or resolves. This phase adds no database table. Credentials live only in the deployment environment. A read-only admin page shows the effective configuration and can send a test email.
 
 - **Transport selection**: `EMAIL_PROVIDER` is one of `smtp`, `brevo`, `mailgun`, or `mailtrap`. Every transport implements one `EmailTransport` interface, so the worker and the API do not branch on the provider.
 - **Enablement**: `EMAIL_NOTIFICATIONS_ENABLED` (default `false`). When false, incident emails are not sent. The admin test endpoint still works when transport configuration is complete, so an operator can verify credentials before enabling alerts.
@@ -212,6 +212,7 @@ All endpoints are prefixed with `/api/v1`.
 
 ### Notifications
 
+- `GET /notifications/settings` — Return the effective email configuration with secret values omitted (`admin` only).
 - `POST /notifications/test` — Send a test email to `NOTIFICATION_RECIPIENTS` through the configured transport (`admin` only). Returns `204 No Content` when the provider accepted the message, `503 Service Unavailable` when transport configuration is incomplete, and `502 Bad Gateway` when the provider rejects or cannot be reached.
 
 ## 8. Suggested Repository Structure
@@ -276,4 +277,4 @@ Execute and verify in strict sequential order:
 3. **Phase 3 — Monitoring Engine & Monitor API**: Implement `prober.py` (HTTP status, latency, keyword check, SSL expiry), `scheduler.py` (with 2-strike failure threshold and incident lifecycle), and `/api/v1/monitors` + `/api/v1/dashboard` endpoints.
 4. **Phase 4 — Next.js Frontend**: Scaffold Next.js App Router with Tailwind + Shadcn/UI, build authentication flow, role-aware navigation sidebar, Analytics Dashboard with Recharts, URL Management CRUD + Detail view, and Admin User Management page.
 5. **Phase 5 — End-to-End Verification**: Run full stack via Docker Compose, verify login as both `admin` and `viewer`, add test URLs (valid `200` URL, invalid keyword URL, unreachable URL), confirm incident creation/recovery, and validate dashboard metrics.
-6. **Phase 6 — Email Notifications**: Implement the four transport adapters, incident open/resolve dispatch after commit, environment validation, and the admin test-send endpoint. Verify with pytest: each provider payload, one email per transition, silent first-failure, replica-conflict suppression, failure isolation from check recording, and RBAC on the test endpoint.
+6. **Phase 6 — Email Notifications**: Implement the four transport adapters, incident open/resolve dispatch after commit, environment validation, the admin test-send endpoint, and the read-only admin settings page. Verify with pytest: each provider payload, one email per transition, silent first-failure, replica-conflict suppression, failure isolation from check recording, and RBAC on the notification endpoints.
