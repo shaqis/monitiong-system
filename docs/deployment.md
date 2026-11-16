@@ -124,6 +124,23 @@ services:
       SSL_INSPECT_TIMEOUT_SECONDS: ${SSL_INSPECT_TIMEOUT_SECONDS:-5}
       DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      EMAIL_NOTIFICATIONS_ENABLED: ${EMAIL_NOTIFICATIONS_ENABLED:-false}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
+      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Uptime Monitor}
+      NOTIFICATION_RECIPIENTS: ${NOTIFICATION_RECIPIENTS:-[]}
+      NOTIFICATION_TIMEOUT_SECONDS: ${NOTIFICATION_TIMEOUT_SECONDS:-10}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_SSL: ${SMTP_SSL:-false}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      MAILGUN_API_KEY: ${MAILGUN_API_KEY:-}
+      MAILGUN_DOMAIN: ${MAILGUN_DOMAIN:-}
+      MAILGUN_API_URL: ${MAILGUN_API_URL:-https://api.mailgun.net/v3}
+      MAILTRAP_API_TOKEN: ${MAILTRAP_API_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy
@@ -302,6 +319,25 @@ PROBE_USER_AGENT=UptimeMonitor/1.0
 SSL_INSPECT_TIMEOUT_SECONDS=5
 DB_POOL_SIZE=20
 DB_MAX_OVERFLOW=10
+
+# Email notifications (optional)
+EMAIL_NOTIFICATIONS_ENABLED=false
+EMAIL_PROVIDER=smtp
+EMAIL_FROM_ADDRESS=
+EMAIL_FROM_NAME=Uptime Monitor
+NOTIFICATION_RECIPIENTS=[]
+NOTIFICATION_TIMEOUT_SECONDS=10
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_STARTTLS=true
+SMTP_SSL=false
+BREVO_API_KEY=
+MAILGUN_API_KEY=
+MAILGUN_DOMAIN=
+MAILGUN_API_URL=https://api.mailgun.net/v3
+MAILTRAP_API_TOKEN=
 ```
 
 The application validates these values at startup and exits on a bad one.
@@ -313,6 +349,8 @@ The application validates these values at startup and exits on a bad one.
 - `DB_POOL_SIZE + DB_MAX_OVERFLOW` must be at least `MAX_CONCURRENT_CHECKS`, because each concurrent probe holds a connection.
 - Use hex for `POSTGRES_PASSWORD`. Compose builds `DATABASE_URL` from it, and reserved characters break the URL.
 - `NEXT_PUBLIC_API_URL` must be the same host as `DOMAIN`, with the `/api/v1` path. A different host breaks the session cookie.
+- `NOTIFICATION_RECIPIENTS` is a JSON list of addresses. It is required when `EMAIL_NOTIFICATIONS_ENABLED=true`.
+- Email notifications use only the block for `EMAIL_PROVIDER`. Empty values count as unset. With `smtp`, set `SMTP_HOST` and either both `SMTP_USERNAME` and `SMTP_PASSWORD` or neither. StartTLS (`SMTP_STARTTLS=true`, port 587) and implicit TLS (`SMTP_SSL=true`, port 465) are mutually exclusive.
 - `POSTGRES_PORT`, `BACKEND_PORT`, and `FRONTEND_PORT` from the template are unused here. The production file publishes no application ports.
 - Keep `.env` out of Git. The repository `.gitignore` already excludes it.
 
@@ -384,6 +422,19 @@ Run these checks in order. Each one proves a layer of the deployment.
    ```
 
    Expected: one container. More than one means duplicate probes.
+
+6. Email notifications reach the provider.
+
+   ```bash
+   curl -sS -c /tmp/uptime-cookies -X POST https://monitor.example.com/api/v1/auth/login \
+     -H 'Content-Type: application/json' \
+     -d '{"email":"you@example.com","password":"<FIRST_ADMIN_PASSWORD>"}'
+   curl -sS -o /dev/null -w '%{http_code}\n' -b /tmp/uptime-cookies \
+     -X POST https://monitor.example.com/api/v1/notifications/test
+   rm -f /tmp/uptime-cookies
+   ```
+
+   Expected: `204` when the provider accepted the message, `503` when the transport block is incomplete, and `502` when the provider rejected or could not be reached. The test endpoint works while `EMAIL_NOTIFICATIONS_ENABLED=false`, so credentials can be verified before alerts are turned on. Clear the shell history after the login command.
 
 Then open `https://monitor.example.com` in a browser, sign in with the admin credentials, and add a monitor. Wait one poll interval and confirm the dashboard shows a check.
 

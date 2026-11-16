@@ -35,6 +35,23 @@ Run exactly one `backend` service. The scheduler and the per-monitor check locks
 - `admin`: manages users and creates, edits, pauses, deletes, and checks URLs.
 - `viewer`: reads the dashboard, URL directory, URL details, and incidents. The UI hides mutation controls and redirects `/users` to `/dashboard`; the API also returns `403` for admin-only calls.
 
+## Email notifications
+
+Incident open and recovery can send email through SMTP, Brevo, Mailgun, or Mailtrap. Configuration is environment-only; there is no settings page and no database table for credentials. Set `EMAIL_NOTIFICATIONS_ENABLED=true`, choose `EMAIL_PROVIDER`, fill that provider's block, and list `NOTIFICATION_RECIPIENTS` as a JSON list. Empty optional values count as unset. The first failed check stays silent; an email goes out only when the second consecutive failure opens an incident, and again when a successful check resolves it.
+
+Verify credentials before enabling alerts with the admin-only test endpoint. Sign in, keep the cookie, then call it:
+
+```bash
+curl -sS -c /tmp/uptime-cookies -X POST http://localhost:8000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"<FIRST_ADMIN_PASSWORD>"}'
+curl -sS -o /dev/null -w '%{http_code}\n' -b /tmp/uptime-cookies \
+  -X POST http://localhost:8000/api/v1/notifications/test
+rm -f /tmp/uptime-cookies
+```
+
+`204` means the provider accepted the message, `503` means the transport configuration is incomplete, and `502` means the provider rejected or could not be reached. Delivery is best effort. A failed send is logged and does not change the check, the monitor status, or the incident. There is no retry queue.
+
 ## Security notes
 
 Logout clears the auth cookie only. A bearer token stays valid until it expires. Resetting a user's password invalidates every token issued before the reset.

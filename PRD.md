@@ -144,6 +144,25 @@ Provides a high-level operational overview with a global time-range selector (`1
   - Reset user password.
   - Guardrail: Prevent an admin from deactivating or demoting their own account if they are the last active `admin`.
 
+### 5.5 Email Notifications (Admin, Environment Configured)
+
+Sends an operational email when an incident opens or resolves. This phase adds no database table and no settings UI. Credentials live only in the deployment environment.
+
+- **Transport selection**: `EMAIL_PROVIDER` is one of `smtp`, `brevo`, `mailgun`, or `mailtrap`. Every transport implements one `EmailTransport` interface, so the worker and the API do not branch on the provider.
+- **Enablement**: `EMAIL_NOTIFICATIONS_ENABLED` (default `false`). When false, incident emails are not sent. The admin test endpoint still works when transport configuration is complete, so an operator can verify credentials before enabling alerts.
+- **Sender**: `EMAIL_FROM_ADDRESS` and `EMAIL_FROM_NAME` (default `Uptime Monitor`).
+- **Recipients**: `NOTIFICATION_RECIPIENTS` is a JSON list of addresses, for example `["ops@example.com","oncall@example.com"]`. It is required when alerts are enabled.
+- **SMTP**: `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_STARTTLS` (default `true`), `SMTP_SSL` (default `false`). StartTLS and implicit TLS are mutually exclusive.
+- **Brevo**: `BREVO_API_KEY`.
+- **Mailgun**: `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_API_URL` (default `https://api.mailgun.net/v3`; set `https://api.eu.mailgun.net/v3` for the EU region).
+- **Mailtrap**: `MAILTRAP_API_TOKEN` (Mailtrap sending API, `https://send.api.mailtrap.io/api/send`).
+- **Events**:
+  - **Incident opened**: after the second consecutive failed check commits. The message names the monitor, URL, failure cause, and start time.
+  - **Incident resolved**: after a successful check closes the open incident. The message names the monitor, URL, resolution time, and duration.
+  - A first failed check (`DEGRADED`) does not send email. Further failures on an open incident do not resend it.
+- **Delivery semantics**: best effort, one message per transition, sent after the database transaction commits. A delivery failure is logged and never changes the check result, monitor status, or incident. This phase has no retry queue and no delivery table.
+- **Secrets**: never returned by an API, never logged, and never written to the database.
+
 ## 6. Background Monitoring Engine Rules
 
 1. **Polling Loop**: Every 10 seconds, the scheduler queries `monitors` where `is_active = true` and (`last_checked_at IS NULL` OR `last_checked_at + interval_seconds <= now()`).
@@ -191,6 +210,10 @@ All endpoints are prefixed with `/api/v1`.
 - `POST /users` — Create a new user (`admin` only).
 - `PATCH /users/{id}` — Update user role, name, password, or active status (`admin` only).
 
+### Notifications
+
+- `POST /notifications/test` — Send a test email to `NOTIFICATION_RECIPIENTS` through the configured transport (`admin` only). Returns `204 No Content` when the provider accepted the message, `503 Service Unavailable` when transport configuration is incomplete, and `502 Bad Gateway` when the provider rejects or cannot be reached.
+
 ## 8. Suggested Repository Structure
 
 ```text
@@ -215,7 +238,12 @@ uptime-monitor/
 │       │   ├── auth.py
 │       │   ├── dashboard.py
 │       │   ├── monitors.py
+│       │   ├── notifications.py
 │       │   └── users.py
+│       ├── notifications/       # Incident events and email transports
+│       │   ├── events.py
+│       │   ├── service.py
+│       │   └── transports.py
 │       └── worker/
 │           ├── prober.py        # httpx probe + SSL expiry checker
 │           └── scheduler.py     # Async periodic check runner
@@ -248,3 +276,4 @@ Execute and verify in strict sequential order:
 3. **Phase 3 — Monitoring Engine & Monitor API**: Implement `prober.py` (HTTP status, latency, keyword check, SSL expiry), `scheduler.py` (with 2-strike failure threshold and incident lifecycle), and `/api/v1/monitors` + `/api/v1/dashboard` endpoints.
 4. **Phase 4 — Next.js Frontend**: Scaffold Next.js App Router with Tailwind + Shadcn/UI, build authentication flow, role-aware navigation sidebar, Analytics Dashboard with Recharts, URL Management CRUD + Detail view, and Admin User Management page.
 5. **Phase 5 — End-to-End Verification**: Run full stack via Docker Compose, verify login as both `admin` and `viewer`, add test URLs (valid `200` URL, invalid keyword URL, unreachable URL), confirm incident creation/recovery, and validate dashboard metrics.
+6. **Phase 6 — Email Notifications**: Implement the four transport adapters, incident open/resolve dispatch after commit, environment validation, and the admin test-send endpoint. Verify with pytest: each provider payload, one email per transition, silent first-failure, replica-conflict suppression, failure isolation from check recording, and RBAC on the test endpoint.
