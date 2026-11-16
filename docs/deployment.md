@@ -349,8 +349,10 @@ The application validates these values at startup and exits on a bad one.
 - `DB_POOL_SIZE + DB_MAX_OVERFLOW` must be at least `MAX_CONCURRENT_CHECKS`, because each concurrent probe holds a connection.
 - Use hex for `POSTGRES_PASSWORD`. Compose builds `DATABASE_URL` from it, and reserved characters break the URL.
 - `NEXT_PUBLIC_API_URL` must be the same host as `DOMAIN`, with the `/api/v1` path. A different host breaks the session cookie.
-- `NOTIFICATION_RECIPIENTS` is a JSON list of addresses. It is required when `EMAIL_NOTIFICATIONS_ENABLED=true`.
-- Email notifications use only the block for `EMAIL_PROVIDER`. Empty values count as unset. With `smtp`, set `SMTP_HOST` and either both `SMTP_USERNAME` and `SMTP_PASSWORD` or neither. StartTLS (`SMTP_STARTTLS=true`, port 587) and implicit TLS (`SMTP_SSL=true`, port 465) are mutually exclusive.
+- `NOTIFICATION_RECIPIENTS` is a JSON list of addresses. It is required when `EMAIL_NOTIFICATIONS_ENABLED=true` and no settings have been saved in the app.
+- Email notifications use the block for `EMAIL_PROVIDER` only as the fallback when nothing is saved on the **Settings** page. Empty values count as unset. With `smtp`, set `SMTP_HOST` and either both `SMTP_USERNAME` and `SMTP_PASSWORD` or neither. StartTLS (`SMTP_STARTTLS=true`, port 587) and implicit TLS (`SMTP_SSL=true`, port 465) are mutually exclusive.
+- Admins can save SMTP or Brevo details on the **Settings** page. A saved row overrides the environment for every later send and takes effect without a restart. Mailgun and Mailtrap remain environment-only.
+- Saved `SMTP_PASSWORD` and `BREVO_API_KEY` values are encrypted at rest with a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` makes them undecryptable, so re-enter the saved secret on the settings page after a rotation.
 - `POSTGRES_PORT`, `BACKEND_PORT`, and `FRONTEND_PORT` from the template are unused here. The production file publishes no application ports.
 - Keep `.env` out of Git. The repository `.gitignore` already excludes it.
 
@@ -434,7 +436,7 @@ Run these checks in order. Each one proves a layer of the deployment.
    rm -f /tmp/uptime-cookies
    ```
 
-   Expected: `204` when the provider accepted the message, `503` when the transport block is incomplete, and `502` when the provider rejected or could not be reached. The test endpoint works while `EMAIL_NOTIFICATIONS_ENABLED=false`, so credentials can be verified before alerts are turned on. Clear the shell history after the login command.
+   Expected: `204` when the provider accepted the message, `503` when the transport block is incomplete, and `502` when the provider rejected or could not be reached. The test uses the saved settings row when present, otherwise the environment block. It works while `EMAIL_NOTIFICATIONS_ENABLED=false`, so credentials can be verified before alerts are turned on. Clear the shell history after the login command.
 
 Then open `https://monitor.example.com` in a browser, sign in with the admin credentials, and add a monitor. Wait one poll interval and confirm the dashboard shows a check.
 
