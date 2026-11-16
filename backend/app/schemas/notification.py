@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 NotificationProviderValue = Literal["smtp", "brevo", "mailgun", "mailtrap"]
-EditableProviderValue = Literal["smtp", "brevo"]
+EditableProviderValue = Literal["smtp", "brevo", "mailgun", "mailtrap"]
 NotificationSettingsSource = Literal["database", "environment"]
 
 
@@ -24,6 +24,9 @@ class NotificationSettingsResponse(BaseModel):
     smtp_password_set: bool
     brevo_api_key_set: bool
     mailgun_domain: str | None
+    mailgun_api_url: str | None
+    mailgun_api_key_set: bool
+    mailtrap_api_token_set: bool
     provider_credentials_set: bool
 
 
@@ -41,12 +44,20 @@ class NotificationSettingsUpdate(BaseModel):
     smtp_username: str | None = Field(default=None, max_length=255)
     smtp_password: str | None = None
     brevo_api_key: str | None = None
+    mailgun_api_key: str | None = None
+    mailgun_domain: str | None = Field(default=None, max_length=255)
+    mailgun_api_url: str | None = Field(default=None, max_length=255)
+    mailtrap_api_token: str | None = None
 
     @field_validator(
         "smtp_host",
         "smtp_username",
         "smtp_password",
         "brevo_api_key",
+        "mailgun_api_key",
+        "mailgun_domain",
+        "mailgun_api_url",
+        "mailtrap_api_token",
         mode="before",
     )
     @classmethod

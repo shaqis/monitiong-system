@@ -8,6 +8,8 @@ from app.core.config import Settings
 from app.db.models import NotificationSettings
 from app.notifications.config import (
     BrevoConfig,
+    MailgunConfig,
+    MailtrapConfig,
     NotificationConfig,
     ProviderConfig,
     SmtpConfig,
@@ -21,6 +23,7 @@ SINGLETON_ID = 1
 DEFAULT_FROM_NAME = "Uptime Monitor"
 DEFAULT_SMTP_PORT = 587
 DEFAULT_TIMEOUT_SECONDS = 10.0
+DEFAULT_MAILGUN_API_URL = "https://api.mailgun.net/v3"
 DECRYPTION_FAILURE = (
     "The saved notification secrets cannot be decrypted with the current JWT_SECRET. "
     "Enter the secret again and save."
@@ -34,28 +37,30 @@ def _decrypt(token: str, settings: Settings) -> str:
         raise NotificationConfigError(DECRYPTION_FAILURE) from None
 
 
+def _stored_secret(token: str | None, settings: Settings) -> str | None:
+    return _decrypt(token, settings) if token is not None else None
+
+
 def _provider_from_row(row: NotificationSettings, settings: Settings) -> ProviderConfig:
     if row.provider == "smtp":
-        password = (
-            _decrypt(row.smtp_password_encrypted, settings)
-            if row.smtp_password_encrypted is not None
-            else None
-        )
         return SmtpConfig(
             host=row.smtp_host,
             port=row.smtp_port,
             username=row.smtp_username,
-            password=password,
+            password=_stored_secret(row.smtp_password_encrypted, settings),
             start_tls=row.smtp_starttls,
             use_tls=row.smtp_ssl,
         )
     if row.provider == "brevo":
-        api_key = (
-            _decrypt(row.brevo_api_key_encrypted, settings)
-            if row.brevo_api_key_encrypted is not None
-            else None
+        return BrevoConfig(api_key=_stored_secret(row.brevo_api_key_encrypted, settings))
+    if row.provider == "mailgun":
+        return MailgunConfig(
+            api_key=_stored_secret(row.mailgun_api_key_encrypted, settings),
+            domain=row.mailgun_domain,
+            api_url=row.mailgun_api_url or DEFAULT_MAILGUN_API_URL,
         )
-        return BrevoConfig(api_key=api_key)
+    if row.provider == "mailtrap":
+        return MailtrapConfig(api_token=_stored_secret(row.mailtrap_api_token_encrypted, settings))
     raise NotificationConfigError("The saved notification provider is not supported")
 
 
@@ -96,11 +101,7 @@ def _env_seed(settings: Settings) -> dict[str, Any]:
     smtp = provider if isinstance(provider, SmtpConfig) else None
     return {
         "enabled": config.enabled if config is not None else False,
-        "provider": (
-            config.provider_name
-            if config is not None and isinstance(provider, (SmtpConfig, BrevoConfig))
-            else "smtp"
-        ),
+        "provider": config.provider_name if config is not None else "smtp",
         "from_address": config.sender_email if config is not None else None,
         "from_name": config.sender_name if config is not None else DEFAULT_FROM_NAME,
         "recipients": list(config.recipients) if config is not None else [],
@@ -112,6 +113,8 @@ def _env_seed(settings: Settings) -> dict[str, Any]:
         "smtp_starttls": smtp.start_tls if smtp is not None else True,
         "smtp_ssl": smtp.use_tls if smtp is not None else False,
         "smtp_username": smtp.username if smtp is not None else None,
+        "mailgun_domain": settings.mailgun_domain,
+        "mailgun_api_url": settings.mailgun_api_url,
     }
 
 
@@ -128,7 +131,64 @@ def _row_seed(row: NotificationSettings) -> dict[str, Any]:
         "smtp_starttls": row.smtp_starttls,
         "smtp_ssl": row.smtp_ssl,
         "smtp_username": row.smtp_username,
+        "mailgun_domain": row.mailgun_domain,
+        "mailgun_api_url": row.mailgun_api_url,
     }
+
+
+def _provider_from_update(
+    values: dict[str, Any],
+    provided: dict[str, Any],
+    settings: Settings,
+    *,
+    smtp_password_encrypted: str | None,
+    brevo_api_key_encrypted: str | None,
+    mailgun_api_key_encrypted: str | None,
+    mailtrap_api_token_encrypted: str | None,
+) -> ProviderConfig:
+    provider = values["provider"]
+    if provider == "smtp":
+        password = None
+        if smtp_password_encrypted is not None:
+            password = (
+                str(provided["smtp_password"])
+                if provided.get("smtp_password") is not None
+                else _decrypt(smtp_password_encrypted, settings)
+            )
+        return SmtpConfig(
+            host=values["smtp_host"],
+            port=values["smtp_port"],
+            username=values["smtp_username"],
+            password=password,
+            start_tls=values["smtp_starttls"],
+            use_tls=values["smtp_ssl"],
+        )
+    if provider == "brevo":
+        api_key = (
+            str(provided["brevo_api_key"])
+            if provided.get("brevo_api_key") is not None
+            else _stored_secret(brevo_api_key_encrypted, settings)
+        )
+        return BrevoConfig(api_key=api_key)
+    if provider == "mailgun":
+        api_key = (
+            str(provided["mailgun_api_key"])
+            if provided.get("mailgun_api_key") is not None
+            else _stored_secret(mailgun_api_key_encrypted, settings)
+        )
+        return MailgunConfig(
+            api_key=api_key,
+            domain=values["mailgun_domain"],
+            api_url=values["mailgun_api_url"] or DEFAULT_MAILGUN_API_URL,
+        )
+    if provider == "mailtrap":
+        api_token = (
+            str(provided["mailtrap_api_token"])
+            if provided.get("mailtrap_api_token") is not None
+            else _stored_secret(mailtrap_api_token_encrypted, settings)
+        )
+        return MailtrapConfig(api_token=api_token)
+    raise NotificationConfigError("The saved notification provider is not supported")
 
 
 async def save_notification_config(
@@ -142,6 +202,8 @@ async def save_notification_config(
 
     smtp_password_encrypted = row.smtp_password_encrypted if row is not None else None
     brevo_api_key_encrypted = row.brevo_api_key_encrypted if row is not None else None
+    mailgun_api_key_encrypted = row.mailgun_api_key_encrypted if row is not None else None
+    mailtrap_api_token_encrypted = row.mailtrap_api_token_encrypted if row is not None else None
     if row is None:
         env_config = config_from_env(settings)
         env_provider = env_config.provider if env_config is not None else None
@@ -152,6 +214,14 @@ async def save_notification_config(
         if isinstance(env_provider, BrevoConfig) and env_provider.api_key is not None:
             brevo_api_key_encrypted = encrypt_secret(
                 env_provider.api_key, jwt_secret=settings.jwt_secret
+            )
+        if isinstance(env_provider, MailgunConfig) and env_provider.api_key is not None:
+            mailgun_api_key_encrypted = encrypt_secret(
+                env_provider.api_key, jwt_secret=settings.jwt_secret
+            )
+        if isinstance(env_provider, MailtrapConfig) and env_provider.api_token is not None:
+            mailtrap_api_token_encrypted = encrypt_secret(
+                env_provider.api_token, jwt_secret=settings.jwt_secret
             )
 
     if "enabled" in provided:
@@ -190,6 +260,20 @@ async def save_notification_config(
         brevo_api_key_encrypted = encrypt_secret(
             str(provided["brevo_api_key"]), jwt_secret=settings.jwt_secret
         )
+    if "mailgun_api_key" in provided and provided["mailgun_api_key"] is not None:
+        mailgun_api_key_encrypted = encrypt_secret(
+            str(provided["mailgun_api_key"]), jwt_secret=settings.jwt_secret
+        )
+    if "mailgun_domain" in provided:
+        domain = provided["mailgun_domain"]
+        values["mailgun_domain"] = str(domain).strip() if domain is not None else None
+    if "mailgun_api_url" in provided:
+        api_url = provided["mailgun_api_url"]
+        values["mailgun_api_url"] = str(api_url).strip() if api_url is not None else None
+    if "mailtrap_api_token" in provided and provided["mailtrap_api_token"] is not None:
+        mailtrap_api_token_encrypted = encrypt_secret(
+            str(provided["mailtrap_api_token"]), jwt_secret=settings.jwt_secret
+        )
 
     sender_email = values["from_address"]
     if not sender_email:
@@ -198,33 +282,15 @@ async def save_notification_config(
     if not recipients:
         raise NotificationConfigError("At least one notification recipient is required")
 
-    if values["provider"] == "smtp":
-        password = None
-        if smtp_password_encrypted is not None:
-            password = (
-                str(provided["smtp_password"])
-                if provided.get("smtp_password") is not None
-                else _decrypt(smtp_password_encrypted, settings)
-            )
-        provider: ProviderConfig = SmtpConfig(
-            host=values["smtp_host"],
-            port=values["smtp_port"],
-            username=values["smtp_username"],
-            password=password,
-            start_tls=values["smtp_starttls"],
-            use_tls=values["smtp_ssl"],
-        )
-    else:
-        api_key = (
-            str(provided["brevo_api_key"])
-            if provided.get("brevo_api_key") is not None
-            else (
-                _decrypt(brevo_api_key_encrypted, settings)
-                if brevo_api_key_encrypted is not None
-                else None
-            )
-        )
-        provider = BrevoConfig(api_key=api_key)
+    provider = _provider_from_update(
+        values,
+        provided,
+        settings,
+        smtp_password_encrypted=smtp_password_encrypted,
+        brevo_api_key_encrypted=brevo_api_key_encrypted,
+        mailgun_api_key_encrypted=mailgun_api_key_encrypted,
+        mailtrap_api_token_encrypted=mailtrap_api_token_encrypted,
+    )
 
     config = NotificationConfig(
         enabled=values["enabled"],
@@ -241,6 +307,8 @@ async def save_notification_config(
         "id": SINGLETON_ID,
         "smtp_password_encrypted": smtp_password_encrypted,
         "brevo_api_key_encrypted": brevo_api_key_encrypted,
+        "mailgun_api_key_encrypted": mailgun_api_key_encrypted,
+        "mailtrap_api_token_encrypted": mailtrap_api_token_encrypted,
     }
     statement = pg_insert(NotificationSettings).values(**stored)
     statement = statement.on_conflict_do_update(
