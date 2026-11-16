@@ -120,12 +120,14 @@ async def client(test_engine, test_settings) -> AsyncIterator[AsyncClient]:
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_settings] = lambda: test_settings
     app.state.check_runner = CheckRunner(maker, prober=_successful_prober)
+    app.state.notifier = None
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
     app.state.check_runner = None
+    app.state.notifier = None
     app.dependency_overrides.clear()
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -9,6 +10,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.models import Incident, Monitor, MonitorCheck
+from app.notifications.events import IncidentEvent, IncidentOpened, IncidentResolved
+from app.notifications.service import IncidentNotifier
 from app.worker.prober import (
     DEFAULT_SSL_INSPECT_TIMEOUT_SECONDS,
     DEFAULT_USER_AGENT,
@@ -18,6 +21,8 @@ from app.worker.prober import (
     probe,
 )
 from app.worker.state import MonitorState, apply_probe_result
+
+logger = logging.getLogger(__name__)
 
 Prober = Callable[..., Awaitable[ProbeResult]]
 
@@ -37,6 +42,12 @@ class TargetSnapshot:
     http_method: str
     expected_status_code: int
     keyword: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecordOutcome:
+    check: MonitorCheck
+    event: IncidentEvent | None = None
 
 
 class MonitorNotFound(Exception):
@@ -73,6 +84,7 @@ class CheckRunner:
         max_concurrent_checks: int = 20,
         user_agent: str = DEFAULT_USER_AGENT,
         ssl_inspect_timeout_seconds: float = DEFAULT_SSL_INSPECT_TIMEOUT_SECONDS,
+        notifier: IncidentNotifier | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._prober = prober
@@ -81,6 +93,7 @@ class CheckRunner:
         self._inflight: set[UUID] = set()
         self._user_agent = user_agent
         self._ssl_inspect_timeout_seconds = ssl_inspect_timeout_seconds
+        self._notifier = notifier
 
     def aclose(self) -> None:
         self._ssl_executor.shutdown(wait=False, cancel_futures=True)
@@ -98,7 +111,16 @@ class CheckRunner:
                     ssl_inspect_timeout_seconds=self._ssl_inspect_timeout_seconds,
                     ssl_executor=self._ssl_executor,
                 )
-                return await self._record(monitor_id, snapshot, result)
+                outcome = await self._record(monitor_id, snapshot, result)
+                if outcome.event is not None and self._notifier is not None:
+                    try:
+                        await self._notifier.notify(outcome.event)
+                    except Exception:
+                        logger.exception(
+                            "Incident notification failed",
+                            extra={"monitor_id": str(monitor_id)},
+                        )
+                return outcome.check
         finally:
             self._inflight.discard(monitor_id)
 
@@ -144,8 +166,9 @@ class CheckRunner:
         monitor_id: UUID,
         snapshot: TargetSnapshot,
         result: ProbeResult,
-    ) -> MonitorCheck:
+    ) -> RecordOutcome:
         checked_at = datetime.now(UTC)
+        event: IncidentEvent | None = None
         async with self._session_factory() as session:
             async with session.begin():
                 monitor = await session.scalar(
@@ -160,19 +183,21 @@ class CheckRunner:
                 ):
                     raise MonitorChanged(str(monitor_id))
 
-                open_incident_id = await session.scalar(
-                    select(Incident.id)
-                    .where(
-                        Incident.monitor_id == monitor_id,
-                        Incident.resolved_at.is_(None),
+                open_incident = (
+                    await session.execute(
+                        select(Incident.id, Incident.started_at)
+                        .where(
+                            Incident.monitor_id == monitor_id,
+                            Incident.resolved_at.is_(None),
+                        )
+                        .limit(1)
                     )
-                    .limit(1)
-                )
+                ).first()
 
                 transition = apply_probe_result(
                     MonitorState(
                         consecutive_failures=monitor.consecutive_failures,
-                        has_open_incident=open_incident_id is not None,
+                        has_open_incident=open_incident is not None,
                     ),
                     result.ok,
                 )
@@ -197,11 +222,18 @@ class CheckRunner:
                     # known reading.
                     monitor.ssl_days_remaining = result.ssl_days_remaining
 
+                monitor_name = monitor.name
+                monitor_url = monitor.url
+                opened = False
+                resolved = False
+
                 if transition.open_incident:
                     # A second replica can insert the open incident between the
                     # read above and this write. Dropping the conflict keeps the
-                    # check and the status update in the same transaction.
-                    await session.execute(
+                    # check and the status update in the same transaction. Only
+                    # the writer that inserts the row notifies, so a conflict
+                    # cannot send a duplicate email.
+                    inserted = await session.execute(
                         pg_insert(Incident)
                         .values(
                             monitor_id=monitor_id,
@@ -213,8 +245,9 @@ class CheckRunner:
                             index_where=Incident.resolved_at.is_(None),
                         )
                     )
+                    opened = inserted.rowcount == 1
                 elif transition.resolve_incident:
-                    await session.execute(
+                    closed = await session.execute(
                         update(Incident)
                         .where(
                             Incident.monitor_id == monitor_id,
@@ -222,7 +255,29 @@ class CheckRunner:
                         )
                         .values(resolved_at=checked_at)
                     )
+                    resolved = bool(closed.rowcount)
 
             await session.refresh(check)
 
-        return check
+            if opened:
+                event = IncidentOpened(
+                    monitor_id=monitor_id,
+                    monitor_name=monitor_name,
+                    monitor_url=monitor_url,
+                    cause=result.error_message or "Check failed",
+                    opened_at=checked_at,
+                )
+            elif resolved and open_incident is not None:
+                event = IncidentResolved(
+                    monitor_id=monitor_id,
+                    monitor_name=monitor_name,
+                    monitor_url=monitor_url,
+                    started_at=open_incident.started_at,
+                    resolved_at=checked_at,
+                    duration_seconds=max(
+                        0,
+                        int((checked_at - open_incident.started_at).total_seconds()),
+                    ),
+                )
+
+        return RecordOutcome(check=check, event=event)
