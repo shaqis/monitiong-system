@@ -9,6 +9,7 @@ import type {
   MonitorDetail,
   MonitorListItem,
   MonitorUpdateInput,
+  NotificationSettings,
   StatusFilter,
   TimeRange,
   User,
@@ -251,4 +252,16 @@ export function updateUser(id: string, input: UserUpdateInput): Promise<User> {
     method: "PATCH",
     body: input,
   });
+}
+
+export function getNotificationSettings(
+  options?: ApiRequestOptions,
+): Promise<NotificationSettings> {
+  return request<NotificationSettings>("/notifications/settings", {
+    cookieHeader: options?.cookieHeader,
+  });
+}
+
+export function sendTestNotification(): Promise<void> {
+  return request<void>("/notifications/test", { method: "POST" });
 }

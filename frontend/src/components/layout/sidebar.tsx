@@ -3,7 +3,7 @@
 import type { ComponentType } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Link2, LayoutDashboard, Users } from "lucide-react";
+import { Activity, Link2, LayoutDashboard, Settings, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -33,6 +33,13 @@ const NAV_ITEMS: NavItem[] = [
     icon: Users,
     adminOnly: true,
     matches: (pathname) => pathname === "/users",
+  },
+  {
+    href: "/settings",
+    label: "Settings",
+    icon: Settings,
+    adminOnly: true,
+    matches: (pathname) => pathname === "/settings",
   },
 ];
 

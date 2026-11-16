@@ -7,7 +7,7 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.db.models import Incident
 from app.main import app
 from app.notifications.events import IncidentOpened, IncidentResolved
@@ -56,6 +56,7 @@ def _settings(**overrides) -> Settings:
         "first_admin_password": "test-admin-password",
         "first_admin_name": "Admin",
         "jwt_secret": "test-secret-that-is-at-least-32-bytes-long",
+        "email_notifications_enabled": False,
         "email_from_address": "alerts@example.com",
         "notification_recipients": ["ops@example.com"],
     }
@@ -440,3 +441,49 @@ async def test_test_endpoint_reports_provider_failure(client, create_user, login
 
     assert response.status_code == 502
     assert "mailtrap" not in response.text
+
+
+async def test_settings_endpoint_returns_safe_configuration(client, create_user, login) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+    configured = Settings(
+        database_url="postgresql+asyncpg://user:pass@localhost:5432/uptime",
+        first_admin_email="admin@example.com",
+        first_admin_password="test-admin-password",
+        first_admin_name="Admin",
+        jwt_secret="test-secret-that-is-long-enough-for-hs512-signing-and-at-least-32-bytes",
+        email_notifications_enabled=True,
+        email_provider="brevo",
+        email_from_address="alerts@example.com",
+        notification_recipients=["ops@example.com"],
+        brevo_api_key="super-secret-key",
+    )
+    app.dependency_overrides[get_settings] = lambda: configured
+    app.state.notifier = _service(RecordingTransport())
+
+    response = await client.get(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["provider"] == "brevo"
+    assert body["configured"] is True
+    assert body["from_address"] == "alerts@example.com"
+    assert body["recipients"] == ["ops@example.com"]
+    assert body["provider_credentials_set"] is True
+    assert "super-secret-key" not in response.text
+
+
+async def test_settings_endpoint_rejects_viewer(client, create_user, login) -> None:
+    viewer = await create_user(email="viewer@example.com", password="viewer-password")
+    token = await login(viewer.email, "viewer-password")
+
+    response = await client.get(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403
