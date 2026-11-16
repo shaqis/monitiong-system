@@ -495,7 +495,19 @@ async def test_incident_insert_conflict_keeps_the_check(
         )
         await setup.commit()
 
-    runner = CheckRunner(session_factory, SequenceProber([_failure()]))
+    class RecordingNotifier:
+        def __init__(self) -> None:
+            self.events: list[object] = []
+
+        async def notify(self, event: object) -> None:
+            self.events.append(event)
+
+    notifier = RecordingNotifier()
+    runner = CheckRunner(
+        session_factory,
+        SequenceProber([_failure()]),
+        notifier=notifier,
+    )
     try:
         await runner.run(monitor.id)
     finally:
@@ -518,6 +530,7 @@ async def test_incident_insert_conflict_keeps_the_check(
     assert stored is not None
     assert stored.current_status == "DOWN"
     assert stored.consecutive_failures == 2
+    assert notifier.events == []
 
 
 async def test_aclose_refuses_new_probe_work(session_factory, create_monitor) -> None:

@@ -24,6 +24,23 @@ def clear_settings_environment(monkeypatch) -> None:
         "DB_POOL_SIZE",
         "DB_MAX_OVERFLOW",
         "MAX_CONCURRENT_CHECKS",
+        "EMAIL_NOTIFICATIONS_ENABLED",
+        "EMAIL_PROVIDER",
+        "EMAIL_FROM_ADDRESS",
+        "EMAIL_FROM_NAME",
+        "NOTIFICATION_RECIPIENTS",
+        "NOTIFICATION_TIMEOUT_SECONDS",
+        "SMTP_HOST",
+        "SMTP_PORT",
+        "SMTP_USERNAME",
+        "SMTP_PASSWORD",
+        "SMTP_STARTTLS",
+        "SMTP_SSL",
+        "BREVO_API_KEY",
+        "MAILGUN_API_KEY",
+        "MAILGUN_DOMAIN",
+        "MAILGUN_API_URL",
+        "MAILTRAP_API_TOKEN",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -182,3 +199,110 @@ def test_settings_allow_insecure_cookie_for_loopback_origin() -> None:
     settings = build_settings(cookie_secure=False, cors_origins=["http://127.0.0.1:3000"])
 
     assert settings.cookie_secure is False
+
+
+def test_settings_allow_disabled_email_notifications_without_config() -> None:
+    settings = build_settings()
+
+    assert settings.email_notifications_enabled is False
+    assert settings.email_provider == "smtp"
+    assert settings.email_from_address is None
+    assert settings.notification_recipients == []
+
+
+def test_settings_require_email_configuration_when_enabled() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(email_notifications_enabled=True)
+
+    message = str(exc_info.value)
+    assert "EMAIL_FROM_ADDRESS" in message
+
+
+def test_settings_require_recipients_when_email_is_enabled() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(
+            email_notifications_enabled=True,
+            email_from_address="alerts@example.com",
+            smtp_host="smtp.example.com",
+        )
+
+    assert "NOTIFICATION_RECIPIENTS" in str(exc_info.value)
+
+
+def test_settings_require_provider_credentials_when_enabled() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(
+            email_notifications_enabled=True,
+            email_provider="brevo",
+            email_from_address="alerts@example.com",
+            notification_recipients=["ops@example.com"],
+        )
+
+    assert "BREVO_API_KEY" in str(exc_info.value)
+
+
+def test_settings_require_smtp_username_and_password_together() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(
+            email_notifications_enabled=True,
+            email_from_address="alerts@example.com",
+            notification_recipients=["ops@example.com"],
+            smtp_host="smtp.example.com",
+            smtp_username="smtp-user",
+        )
+
+    assert "SMTP_USERNAME" in str(exc_info.value)
+
+
+def test_settings_reject_starttls_and_implicit_tls_together() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(
+            email_notifications_enabled=True,
+            email_from_address="alerts@example.com",
+            notification_recipients=["ops@example.com"],
+            smtp_host="smtp.example.com",
+            smtp_starttls=True,
+            smtp_ssl=True,
+        )
+
+    assert "SMTP_STARTTLS" in str(exc_info.value)
+
+
+def test_settings_accept_complete_smtp_configuration() -> None:
+    settings = build_settings(
+        email_notifications_enabled=True,
+        email_from_address="alerts@example.com",
+        notification_recipients=["ops@example.com"],
+        smtp_host="smtp.example.com",
+        smtp_username="smtp-user",
+        smtp_password="smtp-password",
+    )
+
+    assert settings.email_from_address == "alerts@example.com"
+    assert settings.notification_recipients == ["ops@example.com"]
+
+
+def test_settings_hide_email_secrets_in_repr() -> None:
+    settings = build_settings(
+        email_provider="brevo",
+        brevo_api_key="super-secret-key",
+        smtp_password="super-secret-password",
+    )
+
+    representation = repr(settings)
+    assert "super-secret-key" not in representation
+    assert "super-secret-password" not in representation
+
+
+def test_settings_treat_blank_optional_email_values_as_unset() -> None:
+    settings = build_settings(
+        email_from_address="",
+        smtp_host="",
+        smtp_password="",
+        mailgun_api_key="",
+    )
+
+    assert settings.email_from_address is None
+    assert settings.smtp_host is None
+    assert settings.smtp_password is None
+    assert settings.mailgun_api_key is None
