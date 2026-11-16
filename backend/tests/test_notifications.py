@@ -743,6 +743,142 @@ async def test_smtp_password_is_encrypted_at_rest(
     )
 
 
+async def test_settings_patch_saves_mailgun_configuration(
+    client,
+    create_user,
+    login,
+    session_factory,
+    test_settings,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "enabled": True,
+            "provider": "mailgun",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "mailgun_api_key": "super-secret-mailgun-key",
+            "mailgun_domain": "mg.example.com",
+            "mailgun_api_url": "https://api.eu.mailgun.net/v3",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["configured"] is True
+    assert body["provider"] == "mailgun"
+    assert body["mailgun_api_key_set"] is True
+    assert body["mailgun_domain"] == "mg.example.com"
+    assert body["mailgun_api_url"] == "https://api.eu.mailgun.net/v3"
+    assert "super-secret-mailgun-key" not in response.text
+
+    async with session_factory() as session:
+        row = await session.get(NotificationSettings, 1)
+    assert row is not None
+    assert row.mailgun_api_key_encrypted is not None
+    assert row.mailgun_api_key_encrypted != "super-secret-mailgun-key"
+    assert "super-secret-mailgun-key" not in row.mailgun_api_key_encrypted
+    assert (
+        decrypt_secret(row.mailgun_api_key_encrypted, jwt_secret=test_settings.jwt_secret)
+        == "super-secret-mailgun-key"
+    )
+    assert row.mailgun_domain == "mg.example.com"
+    assert row.mailgun_api_url == "https://api.eu.mailgun.net/v3"
+
+
+async def test_settings_patch_saves_mailtrap_configuration(
+    client,
+    create_user,
+    login,
+    session_factory,
+    test_settings,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "enabled": True,
+            "provider": "mailtrap",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "mailtrap_api_token": "super-secret-mailtrap-token",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["configured"] is True
+    assert body["provider"] == "mailtrap"
+    assert body["mailtrap_api_token_set"] is True
+    assert "super-secret-mailtrap-token" not in response.text
+
+    async with session_factory() as session:
+        row = await session.get(NotificationSettings, 1)
+    assert row is not None
+    assert row.mailtrap_api_token_encrypted is not None
+    assert row.mailtrap_api_token_encrypted != "super-secret-mailtrap-token"
+    assert "super-secret-mailtrap-token" not in row.mailtrap_api_token_encrypted
+    assert (
+        decrypt_secret(row.mailtrap_api_token_encrypted, jwt_secret=test_settings.jwt_secret)
+        == "super-secret-mailtrap-token"
+    )
+
+
+async def test_settings_patch_rejects_mailgun_without_a_domain(
+    client,
+    create_user,
+    login,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "provider": "mailgun",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "mailgun_api_key": "super-secret-mailgun-key",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "super-secret-mailgun-key" not in response.text
+
+
+async def test_settings_patch_rejects_a_plain_http_mailgun_api_url(
+    client,
+    create_user,
+    login,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "provider": "mailgun",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "mailgun_api_key": "super-secret-mailgun-key",
+            "mailgun_domain": "mg.example.com",
+            "mailgun_api_url": "http://api.mailgun.net/v3",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "super-secret-mailgun-key" not in response.text
+
+
 async def test_patch_without_a_password_keeps_the_stored_secret(
     client,
     create_user,

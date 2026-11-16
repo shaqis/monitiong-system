@@ -27,7 +27,6 @@ import {
   updateNotificationSettings,
 } from "@/lib/api";
 import type {
-  EditableNotificationProvider,
   NotificationSettings,
   NotificationSettingsUpdate,
 } from "@/types";
@@ -50,8 +49,7 @@ interface NotificationSettingsViewProps {
 }
 
 function stateFromSettings(settings: NotificationSettings): FormState {
-  const provider: EditableNotificationProvider =
-    settings.provider === "brevo" ? "brevo" : "smtp";
+  const provider = settings.provider;
   const encryption: EncryptionMode = settings.smtp_ssl
     ? "ssl"
     : settings.smtp_starttls
@@ -69,6 +67,10 @@ function stateFromSettings(settings: NotificationSettings): FormState {
     smtpUsername: settings.smtp_username ?? "",
     smtpPassword: "",
     brevoApiKey: "",
+    mailgunApiKey: "",
+    mailgunDomain: settings.mailgun_domain ?? "",
+    mailgunApiUrl: settings.mailgun_api_url ?? "",
+    mailtrapApiToken: "",
   };
 }
 
@@ -141,8 +143,18 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
       if (form.smtpPassword.length > 0) {
         input.smtp_password = form.smtpPassword;
       }
-    } else if (form.brevoApiKey.length > 0) {
-      input.brevo_api_key = form.brevoApiKey;
+    } else if (form.provider === "brevo") {
+      if (form.brevoApiKey.length > 0) {
+        input.brevo_api_key = form.brevoApiKey;
+      }
+    } else if (form.provider === "mailgun") {
+      if (form.mailgunApiKey.length > 0) {
+        input.mailgun_api_key = form.mailgunApiKey;
+      }
+      input.mailgun_domain = form.mailgunDomain.trim() || null;
+      input.mailgun_api_url = form.mailgunApiUrl.trim() || null;
+    } else if (form.mailtrapApiToken.length > 0) {
+      input.mailtrap_api_token = form.mailtrapApiToken;
     }
     return input;
   }
@@ -167,6 +179,16 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         localErrors.smtp_port = "Port must be between 1 and 65535.";
       }
+    } else if (form.provider === "mailgun") {
+      if (!form.mailgunDomain.trim()) {
+        localErrors.mailgun_domain = "Mailgun domain is required.";
+      }
+    } else if (
+      form.provider === "mailtrap" &&
+      !form.mailtrapApiToken.trim() &&
+      !current.mailtrap_api_token_set
+    ) {
+      localErrors.mailtrap_api_token = "Mailtrap API token is required.";
     }
     if (Object.keys(localErrors).length > 0) {
       setFieldErrors(localErrors);
@@ -393,8 +415,8 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
           </form>
 
           <p className="text-xs text-muted-foreground">
-            Saved SMTP passwords and Brevo API keys are encrypted at rest and never displayed.
-            Rotating <code>JWT_SECRET</code> requires re-entering the saved secret.
+            Saved provider secrets are encrypted at rest and never displayed. Rotating{" "}
+            <code>JWT_SECRET</code> requires re-entering the saved secret.
           </p>
         </CardContent>
       </Card>

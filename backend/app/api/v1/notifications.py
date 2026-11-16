@@ -74,6 +74,10 @@ def _settings_response(
         smtp_username = row.smtp_username
         smtp_password_set = row.smtp_password_encrypted is not None
         brevo_api_key_set = row.brevo_api_key_encrypted is not None
+        mailgun_domain = row.mailgun_domain
+        mailgun_api_url = row.mailgun_api_url
+        mailgun_api_key_set = row.mailgun_api_key_encrypted is not None
+        mailtrap_api_token_set = row.mailtrap_api_token_encrypted is not None
         provider_credentials_set = configured
     else:
         provider = settings.email_provider
@@ -84,6 +88,10 @@ def _settings_response(
         smtp_username = settings.smtp_username
         smtp_password_set = settings.smtp_password is not None
         brevo_api_key_set = settings.brevo_api_key is not None
+        mailgun_domain = settings.mailgun_domain
+        mailgun_api_url = settings.mailgun_api_url
+        mailgun_api_key_set = settings.mailgun_api_key is not None
+        mailtrap_api_token_set = settings.mailtrap_api_token is not None
         provider_credentials_set = _provider_credentials_set(settings)
 
     if config is not None:
@@ -117,7 +125,10 @@ def _settings_response(
         smtp_username=smtp_username,
         smtp_password_set=smtp_password_set,
         brevo_api_key_set=brevo_api_key_set,
-        mailgun_domain=settings.mailgun_domain,
+        mailgun_domain=mailgun_domain,
+        mailgun_api_url=mailgun_api_url,
+        mailgun_api_key_set=mailgun_api_key_set,
+        mailtrap_api_token_set=mailtrap_api_token_set,
         provider_credentials_set=provider_credentials_set,
     )
 

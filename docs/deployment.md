@@ -351,8 +351,8 @@ The application validates these values at startup and exits on a bad one.
 - `NEXT_PUBLIC_API_URL` must be the same host as `DOMAIN`, with the `/api/v1` path. A different host breaks the session cookie.
 - `NOTIFICATION_RECIPIENTS` is a JSON list of addresses. It is required when `EMAIL_NOTIFICATIONS_ENABLED=true` and no settings have been saved in the app.
 - Email notifications use the block for `EMAIL_PROVIDER` only as the fallback when nothing is saved on the **Settings** page. Empty values count as unset. With `smtp`, set `SMTP_HOST` and either both `SMTP_USERNAME` and `SMTP_PASSWORD` or neither. StartTLS (`SMTP_STARTTLS=true`, port 587) and implicit TLS (`SMTP_SSL=true`, port 465) are mutually exclusive.
-- Admins can save SMTP or Brevo details on the **Settings** page. A saved row overrides the environment for every later send and takes effect without a restart. Mailgun and Mailtrap remain environment-only.
-- Saved `SMTP_PASSWORD` and `BREVO_API_KEY` values are encrypted at rest with a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` makes them undecryptable, so re-enter the saved secret on the settings page after a rotation.
+- Admins can save SMTP, Brevo, Mailgun, or Mailtrap details on the **Settings** page. Mailgun stores an API key with a sending domain and an optional API URL (blank uses `https://api.mailgun.net/v3`; EU accounts use `https://api.eu.mailgun.net/v3`). Mailtrap stores the sending API token. A saved row overrides the environment for every later send and takes effect without a restart.
+- Saved `SMTP_PASSWORD`, `BREVO_API_KEY`, `MAILGUN_API_KEY`, and `MAILTRAP_API_TOKEN` values are encrypted at rest with a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` makes them undecryptable, so re-enter the saved secret on the settings page after a rotation. Leave a secret field blank to keep the stored value.
 - `POSTGRES_PORT`, `BACKEND_PORT`, and `FRONTEND_PORT` from the template are unused here. The production file publishes no application ports.
 - Keep `.env` out of Git. The repository `.gitignore` already excludes it.
 

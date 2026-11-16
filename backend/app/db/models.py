@@ -174,7 +174,7 @@ class NotificationSettings(Base):
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_notification_settings_singleton"),
         CheckConstraint(
-            "provider IN ('smtp', 'brevo')",
+            "provider IN ('smtp', 'brevo', 'mailgun', 'mailtrap')",
             name="ck_notification_settings_provider",
         ),
         CheckConstraint(
@@ -204,6 +204,10 @@ class NotificationSettings(Base):
     smtp_username: Mapped[str | None] = mapped_column(String(255))
     smtp_password_encrypted: Mapped[str | None] = mapped_column(Text)
     brevo_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    mailgun_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    mailgun_domain: Mapped[str | None] = mapped_column(String(255))
+    mailgun_api_url: Mapped[str | None] = mapped_column(String(255))
+    mailtrap_api_token_encrypted: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
