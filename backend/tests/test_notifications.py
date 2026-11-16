@@ -854,6 +854,31 @@ async def test_settings_patch_rejects_mailgun_without_a_domain(
     assert "super-secret-mailgun-key" not in response.text
 
 
+async def test_settings_patch_rejects_a_plain_http_mailgun_api_url(
+    client,
+    create_user,
+    login,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "provider": "mailgun",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "mailgun_api_key": "super-secret-mailgun-key",
+            "mailgun_domain": "mg.example.com",
+            "mailgun_api_url": "http://api.mailgun.net/v3",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "super-secret-mailgun-key" not in response.text
+
+
 async def test_patch_without_a_password_keeps_the_stored_secret(
     client,
     create_user,

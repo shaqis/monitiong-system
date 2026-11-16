@@ -65,3 +65,13 @@ class NotificationSettingsUpdate(BaseModel):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @field_validator("mailgun_api_url")
+    @classmethod
+    def mailgun_api_url_requires_https(cls, value: str | None) -> str | None:
+        # The API key travels in this request, so a stored URL must not downgrade it.
+        if value is None:
+            return None
+        if not value.startswith("https://"):
+            raise ValueError("MAILGUN_API_URL must start with https://")
+        return value
