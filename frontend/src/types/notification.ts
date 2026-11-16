@@ -1,5 +1,5 @@
 export type NotificationProvider = "smtp" | "brevo" | "mailgun" | "mailtrap";
-export type EditableNotificationProvider = "smtp" | "brevo";
+export type EditableNotificationProvider = "smtp" | "brevo" | "mailgun" | "mailtrap";
 export type NotificationSettingsSource = "database" | "environment";
 
 export interface NotificationSettings {
@@ -19,6 +19,9 @@ export interface NotificationSettings {
   smtp_password_set: boolean;
   brevo_api_key_set: boolean;
   mailgun_domain: string | null;
+  mailgun_api_url: string | null;
+  mailgun_api_key_set: boolean;
+  mailtrap_api_token_set: boolean;
   provider_credentials_set: boolean;
 }
 
@@ -36,4 +39,8 @@ export interface NotificationSettingsUpdate {
   smtp_username?: string | null;
   smtp_password?: string;
   brevo_api_key?: string;
+  mailgun_api_key?: string;
+  mailgun_domain?: string | null;
+  mailgun_api_url?: string | null;
+  mailtrap_api_token?: string;
 }
