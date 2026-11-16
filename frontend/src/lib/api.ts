@@ -10,6 +10,7 @@ import type {
   MonitorListItem,
   MonitorUpdateInput,
   NotificationSettings,
+  NotificationSettingsUpdate,
   StatusFilter,
   TimeRange,
   User,
@@ -259,6 +260,15 @@ export function getNotificationSettings(
 ): Promise<NotificationSettings> {
   return request<NotificationSettings>("/notifications/settings", {
     cookieHeader: options?.cookieHeader,
+  });
+}
+
+export function updateNotificationSettings(
+  input: NotificationSettingsUpdate,
+): Promise<NotificationSettings> {
+  return request<NotificationSettings>("/notifications/settings", {
+    method: "PATCH",
+    body: input,
   });
 }
 

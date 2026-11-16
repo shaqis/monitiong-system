@@ -1,4 +1,3 @@
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -12,12 +11,9 @@ from app.core.config import get_settings
 from app.core.errors import public_errors
 from app.db.seed import seed_first_admin
 from app.db.session import SessionLocal
-from app.notifications.service import NotificationService
-from app.notifications.transports import NotificationConfigError, build_transport
+from app.notifications.service import DatabaseNotifier
 from app.worker.checker import CheckRunner
 from app.worker.scheduler import Scheduler
-
-logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -26,34 +22,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with SessionLocal() as session:
         await seed_first_admin(session, settings)
 
-    transport = None
-    try:
-        transport = build_transport(settings)
-    except NotificationConfigError as exc:
-        if settings.email_notifications_enabled:
-            raise
-        logger.warning("Email notifications are disabled: %s", exc)
-
-    notifier = None
-    if (
-        transport is not None
-        and settings.email_from_address is not None
-        and settings.notification_recipients
-    ):
-        notifier = NotificationService(
-            transport,
-            sender_email=str(settings.email_from_address),
-            sender_name=settings.email_from_name.strip() or "Uptime Monitor",
-            recipients=tuple(str(recipient) for recipient in settings.notification_recipients),
-        )
-
+    notifier = DatabaseNotifier(SessionLocal, settings)
     app.state.notifier = notifier
     runner = CheckRunner(
         SessionLocal,
         max_concurrent_checks=settings.max_concurrent_checks,
         user_agent=settings.probe_user_agent,
         ssl_inspect_timeout_seconds=settings.ssl_inspect_timeout_seconds,
-        notifier=notifier if settings.email_notifications_enabled else None,
+        notifier=notifier,
         notification_timeout_seconds=settings.notification_timeout_seconds,
     )
     scheduler = Scheduler(runner, SessionLocal, settings)

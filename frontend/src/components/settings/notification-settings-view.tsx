@@ -1,7 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
 import { Loader2, Send } from "lucide-react";
+import {
+  NotificationProviderFields,
+  type EncryptionMode,
+  type ProviderFields,
+} from "@/components/settings/notification-provider-fields";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,8 +18,19 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { ApiError, sendTestNotification } from "@/lib/api";
-import type { NotificationSettings } from "@/types";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import {
+  ApiError,
+  sendTestNotification,
+  updateNotificationSettings,
+} from "@/lib/api";
+import type {
+  EditableNotificationProvider,
+  NotificationSettings,
+  NotificationSettingsUpdate,
+} from "@/types";
 
 interface Feedback {
   variant: "success" | "destructive";
@@ -21,42 +38,180 @@ interface Feedback {
   body: string;
 }
 
-function providerLabel(provider: NotificationSettings["provider"]): string {
-  switch (provider) {
-    case "smtp":
-      return "SMTP";
-    case "brevo":
-      return "Brevo";
-    case "mailgun":
-      return "Mailgun";
-    case "mailtrap":
-      return "Mailtrap";
-  }
-}
-
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col gap-1 border-b pb-3 last:border-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between">
-      <dt className="text-sm text-muted-foreground">{label}</dt>
-      <dd className="break-all text-sm font-medium sm:text-right">{value}</dd>
-    </div>
-  );
+interface FormState extends ProviderFields {
+  enabled: boolean;
+  fromName: string;
+  fromAddress: string;
+  recipients: string;
 }
 
 interface NotificationSettingsViewProps {
   settings: NotificationSettings;
 }
 
+function stateFromSettings(settings: NotificationSettings): FormState {
+  const provider: EditableNotificationProvider =
+    settings.provider === "brevo" ? "brevo" : "smtp";
+  const encryption: EncryptionMode = settings.smtp_ssl
+    ? "ssl"
+    : settings.smtp_starttls
+      ? "starttls"
+      : "none";
+  return {
+    enabled: settings.enabled,
+    provider,
+    fromName: settings.from_name,
+    fromAddress: settings.from_address ?? "",
+    recipients: settings.recipients.join("\n"),
+    smtpHost: settings.smtp_host ?? "",
+    smtpPort: String(settings.smtp_port || 587),
+    encryption,
+    smtpUsername: settings.smtp_username ?? "",
+    smtpPassword: "",
+    brevoApiKey: "",
+  };
+}
+
+function parseRecipients(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((recipient) => recipient.trim())
+    .filter((recipient) => recipient.length > 0);
+}
+
+function FieldError({ message }: { message: string | undefined }) {
+  if (!message) {
+    return null;
+  }
+  return <p className="text-xs text-red-600">{message}</p>;
+}
+
 export function NotificationSettingsView({ settings }: NotificationSettingsViewProps) {
-  const [pending, setPending] = useState(false);
+  const router = useRouter();
+  const [current, setCurrent] = useState<NotificationSettings>(settings);
+  const [form, setForm] = useState<FormState>(() => stateFromSettings(settings));
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [feedback, setFeedback] = useState<Feedback | null>(null);
 
-  async function sendTest() {
-    setPending(true);
+  function update<K extends keyof FormState>(key: K, value: FormState[K]) {
+    setForm((previous) => ({ ...previous, [key]: value }));
+    setDirty(true);
+  }
+
+  function updateProviderField<K extends keyof ProviderFields>(
+    key: K,
+    value: ProviderFields[K],
+  ) {
+    setForm((previous) => ({ ...previous, [key]: value }));
+    setDirty(true);
+  }
+
+  function changeEncryption(mode: EncryptionMode) {
+    setForm((previous) => {
+      const defaultPort = previous.smtpPort === "587" || previous.smtpPort === "465";
+      let smtpPort = previous.smtpPort;
+      if (defaultPort && mode === "starttls") {
+        smtpPort = "587";
+      } else if (defaultPort && mode === "ssl") {
+        smtpPort = "465";
+      }
+      return { ...previous, encryption: mode, smtpPort };
+    });
+    setDirty(true);
+  }
+
+  function buildInput(): NotificationSettingsUpdate {
+    const input: NotificationSettingsUpdate = {
+      enabled: form.enabled,
+      provider: form.provider,
+      from_address: form.fromAddress.trim(),
+      from_name: form.fromName.trim(),
+      recipients: parseRecipients(form.recipients),
+    };
+    if (form.provider === "smtp") {
+      input.smtp_host = form.smtpHost.trim() || null;
+      input.smtp_port = Number(form.smtpPort);
+      input.smtp_starttls = form.encryption === "starttls";
+      input.smtp_ssl = form.encryption === "ssl";
+      input.smtp_username = form.smtpUsername.trim() || null;
+      if (form.smtpPassword.length > 0) {
+        input.smtp_password = form.smtpPassword;
+      }
+    } else if (form.brevoApiKey.length > 0) {
+      input.brevo_api_key = form.brevoApiKey;
+    }
+    return input;
+  }
+
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     setFeedback(null);
+    setError(null);
+
+    const localErrors: Record<string, string> = {};
+    if (!form.fromAddress.trim()) {
+      localErrors.from_address = "Sender address is required.";
+    }
+    if (parseRecipients(form.recipients).length === 0) {
+      localErrors.recipients = "Add at least one recipient.";
+    }
+    if (form.provider === "smtp") {
+      if (!form.smtpHost.trim()) {
+        localErrors.smtp_host = "SMTP host is required.";
+      }
+      const port = Number(form.smtpPort);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        localErrors.smtp_port = "Port must be between 1 and 65535.";
+      }
+    }
+    if (Object.keys(localErrors).length > 0) {
+      setFieldErrors(localErrors);
+      setError(Object.values(localErrors)[0]);
+      return;
+    }
+
+    setFieldErrors({});
+    setSaving(true);
+    try {
+      const saved = await updateNotificationSettings(buildInput());
+      setCurrent(saved);
+      setForm(stateFromSettings(saved));
+      setDirty(false);
+      setFeedback({
+        variant: "success",
+        title: "Settings saved",
+        body: "Incident alerts now use the saved configuration. No restart is needed.",
+      });
+      router.refresh();
+    } catch (caught) {
+      if (caught instanceof ApiError) {
+        setError(caught.message);
+        const mapped: Record<string, string> = {};
+        for (const field of caught.fields) {
+          if (field.field) {
+            mapped[field.field] = field.message;
+          }
+        }
+        setFieldErrors(mapped);
+      } else {
+        setError("Unable to save the notification settings. Try again.");
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function sendTest() {
+    setTesting(true);
+    setFeedback(null);
+    setError(null);
     try {
       await sendTestNotification();
-      const count = settings.recipients.length;
+      const count = current.recipients.length;
       setFeedback({
         variant: "success",
         title: "Test email sent",
@@ -65,24 +220,34 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
             ? "The provider accepted the message for 1 recipient."
             : `The provider accepted the message for ${count} recipients.`,
       });
-    } catch (error) {
+    } catch (caught) {
       setFeedback({
         variant: "destructive",
         title: "Test email failed",
-        body: error instanceof ApiError ? error.message : "The request failed. Try again.",
+        body:
+          caught instanceof ApiError
+            ? caught.message
+            : "The request failed. Try again.",
       });
     } finally {
-      setPending(false);
+      setTesting(false);
     }
   }
+
+  const testDisabled = testing || saving || dirty || !current.configured;
+  const testHint = dirty
+    ? "Save changes before sending a test."
+    : current.configured
+      ? "The test sends to the saved recipients and works while alerts are disabled."
+      : "Save a complete configuration before sending a test.";
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Email notifications are configured through the backend environment. This page shows
-          the effective configuration and lets you send a test.
+          Incident alerts use the configuration saved here. When nothing is saved, the backend
+          environment is the fallback. Provider credentials are never displayed.
         </p>
       </div>
 
@@ -93,92 +258,28 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
               <CardTitle>Email notifications</CardTitle>
               <CardDescription>Incident open and recovery alerts.</CardDescription>
             </div>
-            <div className="flex gap-2">
-              <Badge variant={settings.enabled ? "success" : "muted"}>
-                {settings.enabled ? "Enabled" : "Disabled"}
+            <div className="flex flex-wrap gap-2">
+              <Badge variant={current.enabled ? "success" : "muted"}>
+                {current.enabled ? "Enabled" : "Disabled"}
               </Badge>
-              <Badge variant={settings.configured ? "success" : "warning"}>
-                {settings.configured ? "Ready to send" : "Not configured"}
+              <Badge variant={current.configured ? "success" : "warning"}>
+                {current.configured ? "Ready to send" : "Not configured"}
+              </Badge>
+              <Badge variant={current.source === "database" ? "info" : "muted"}>
+                {current.source === "database" ? "Saved settings" : "Environment"}
               </Badge>
             </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-6">
-          <dl className="space-y-3">
-            <DetailRow label="Provider" value={providerLabel(settings.provider)} />
-            <DetailRow
-              label="From"
-              value={
-                settings.from_address
-                  ? `${settings.from_name} <${settings.from_address}>`
-                  : "Not set"
-              }
-            />
-            <DetailRow
-              label="Recipients"
-              value={settings.recipients.length > 0 ? settings.recipients.join(", ") : "None"}
-            />
-            <DetailRow label="Timeout" value={`${settings.timeout_seconds} seconds`} />
-          </dl>
-
-          <div>
-            <h2 className="text-sm font-semibold">Provider details</h2>
-            <dl className="mt-3 space-y-3">
-              {settings.provider === "smtp" ? (
-                <>
-                  <DetailRow label="SMTP host" value={settings.smtp_host ?? "Not set"} />
-                  <DetailRow label="SMTP port" value={String(settings.smtp_port)} />
-                  <DetailRow
-                    label="STARTTLS"
-                    value={settings.smtp_starttls ? "Enabled" : "Disabled"}
-                  />
-                  <DetailRow
-                    label="Implicit TLS"
-                    value={settings.smtp_ssl ? "Enabled" : "Disabled"}
-                  />
-                  <DetailRow
-                    label="Authentication"
-                    value={
-                      settings.smtp_username_set
-                        ? "Username and password set"
-                        : "No authentication"
-                    }
-                  />
-                </>
-              ) : null}
-              {settings.provider === "mailgun" ? (
-                <DetailRow
-                  label="Mailgun domain"
-                  value={settings.mailgun_domain ?? "Not set"}
-                />
-              ) : null}
-              {settings.provider !== "smtp" ? (
-                <DetailRow
-                  label="API credentials"
-                  value={settings.provider_credentials_set ? "Set" : "Missing"}
-                />
-              ) : null}
-            </dl>
-          </div>
-
-          <div className="flex flex-col gap-3 rounded-md border bg-muted/40 p-4 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-muted-foreground">
-              The test sends to the configured recipients. It works while notifications are
-              disabled, so you can verify credentials first.
-            </p>
-            <Button
-              type="button"
-              onClick={sendTest}
-              disabled={pending || !settings.configured}
-            >
-              {pending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="mr-2 h-4 w-4" />
-              )}
-              Send test email
-            </Button>
-          </div>
+          {error ? (
+            <Alert variant="destructive">
+              <div>
+                <AlertTitle>Could not save</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </div>
+            </Alert>
+          ) : null}
 
           {feedback ? (
             <Alert variant={feedback.variant}>
@@ -189,9 +290,111 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
             </Alert>
           ) : null}
 
+          <form className="space-y-6" onSubmit={handleSave} noValidate>
+            <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <Label htmlFor="notification-enabled">Enable incident alerts</Label>
+                <p className="text-xs text-muted-foreground">
+                  Send an email when an incident opens or resolves.
+                </p>
+              </div>
+              <Switch
+                id="notification-enabled"
+                checked={form.enabled}
+                onCheckedChange={(checked) => update("enabled", checked)}
+                disabled={saving}
+              />
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="notification-from-name">Sender name</Label>
+                <Input
+                  id="notification-from-name"
+                  value={form.fromName}
+                  onChange={(event) => update("fromName", event.target.value)}
+                  placeholder="Uptime Monitor"
+                  disabled={saving}
+                  maxLength={120}
+                />
+                <FieldError message={fieldErrors.from_name} />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="notification-from-address">From address</Label>
+                <Input
+                  id="notification-from-address"
+                  type="email"
+                  value={form.fromAddress}
+                  onChange={(event) => update("fromAddress", event.target.value)}
+                  placeholder="alerts@example.com"
+                  disabled={saving}
+                  autoComplete="off"
+                />
+                <FieldError message={fieldErrors.from_address} />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="notification-recipients">Recipients</Label>
+              <textarea
+                id="notification-recipients"
+                value={form.recipients}
+                onChange={(event) => update("recipients", event.target.value)}
+                placeholder={"ops@example.com\noncall@example.com"}
+                disabled={saving}
+                rows={3}
+                className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <p className="text-xs text-muted-foreground">
+                Separate addresses with a comma or a new line.
+              </p>
+              <FieldError message={fieldErrors.recipients} />
+            </div>
+
+            <NotificationProviderFields
+              fields={form}
+              settings={current}
+              fieldErrors={fieldErrors}
+              disabled={saving}
+              onChange={updateProviderField}
+              onProviderChange={(provider) => update("provider", provider)}
+              onEncryptionChange={changeEncryption}
+            />
+
+            <div className="flex flex-col gap-4 border-t pt-6 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm text-muted-foreground">{testHint}</p>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button type="submit" disabled={saving}>
+                  {saving ? (
+                    <>
+                      <Loader2 className="animate-spin" aria-hidden="true" />
+                      Saving…
+                    </>
+                  ) : (
+                    "Save changes"
+                  )}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={sendTest}
+                  disabled={testDisabled}
+                >
+                  {testing ? (
+                    <Loader2 className="animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Send aria-hidden="true" />
+                  )}
+                  Send test email
+                </Button>
+              </div>
+            </div>
+          </form>
+
           <p className="text-xs text-muted-foreground">
-            Credentials are read from the backend environment. This page never displays
-            secrets.
+            Saved SMTP passwords and Brevo API keys are encrypted at rest and never displayed.
+            Rotating <code>JWT_SECRET</code> requires re-entering the saved secret.
           </p>
         </CardContent>
       </Card>

@@ -37,9 +37,9 @@ Run exactly one `backend` service. The scheduler and the per-monitor check locks
 
 ## Email notifications
 
-Incident open and recovery can send email through SMTP, Brevo, Mailgun, or Mailtrap. Configuration is environment-only; there is no database table for credentials. Set `EMAIL_NOTIFICATIONS_ENABLED=true`, choose `EMAIL_PROVIDER`, fill that provider's block, and list `NOTIFICATION_RECIPIENTS` as a JSON list. Empty optional values count as unset. The first failed check stays silent; an email goes out only when the second consecutive failure opens an incident, and again when a successful check resolves it.
+Incident open and recovery can send email through SMTP, Brevo, Mailgun, or Mailtrap. Admins save SMTP details or a Brevo API key on the **Settings** page, and the worker reads the effective configuration on every send, so a save applies immediately without a restart. When nothing is saved, the backend environment is the fallback: set `EMAIL_NOTIFICATIONS_ENABLED=true`, choose `EMAIL_PROVIDER`, fill that provider's block, and list `NOTIFICATION_RECIPIENTS` as a JSON list. Mailgun and Mailtrap remain environment-only. Saved `SMTP_PASSWORD` and `BREVO_API_KEY` values are encrypted at rest with a key derived from `JWT_SECRET`, so rotating `JWT_SECRET` requires re-entering them. Empty optional values count as unset. The first failed check stays silent; an email goes out only when the second consecutive failure opens an incident, and again when a successful check resolves it.
 
-Admins can open **Settings** in the sidebar to see the effective configuration and send a test email. The page never displays secrets and does not edit the environment.
+Admins can open **Settings** in the sidebar to edit that configuration and send a test email. The page never displays secrets. Leave a saved password or API key blank to keep the stored value.
 
 Verify credentials before enabling alerts with the admin-only test endpoint. Sign in, keep the cookie, then call it:
 

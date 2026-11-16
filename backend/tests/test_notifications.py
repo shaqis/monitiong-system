@@ -11,10 +11,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
-from app.db.models import Incident
+from app.db.models import Incident, NotificationSettings
 from app.main import app
+from app.notifications.config import NotificationConfig, config_from_env
 from app.notifications.events import IncidentOpened, IncidentResolved
-from app.notifications.service import NotificationService
+from app.notifications.secrets import decrypt_secret
+from app.notifications.service import (
+    DatabaseNotifier,
+    NotificationService,
+)
+from app.notifications.settings_store import save_notification_config
 from app.notifications.transports import (
     BrevoTransport,
     EmailTransportError,
@@ -25,6 +31,7 @@ from app.notifications.transports import (
     SmtpTransport,
     build_transport,
 )
+from app.schemas.notification import NotificationSettingsUpdate
 from app.worker.checker import CheckRunner
 from app.worker.prober import ProbeResult, ProbeTarget
 
@@ -67,58 +74,60 @@ def _settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def _config(**overrides) -> NotificationConfig:
+    config = config_from_env(_settings(**overrides))
+    assert config is not None
+    return config
+
+
+def _transport(**overrides):
+    config = _config(**overrides)
+    return build_transport(config.provider, config.timeout_seconds)
+
+
 def test_build_transport_selects_each_provider() -> None:
+    assert isinstance(_transport(smtp_host="smtp.example.com"), SmtpTransport)
     assert isinstance(
-        build_transport(_settings(smtp_host="smtp.example.com")),
-        SmtpTransport,
-    )
-    assert isinstance(
-        build_transport(_settings(email_provider="brevo", brevo_api_key="brevo-key")),
+        _transport(email_provider="brevo", brevo_api_key="brevo-key"),
         BrevoTransport,
     )
     assert isinstance(
-        build_transport(
-            _settings(
-                email_provider="mailgun",
-                mailgun_api_key="mailgun-key",
-                mailgun_domain="mg.example.com",
-            )
+        _transport(
+            email_provider="mailgun",
+            mailgun_api_key="mailgun-key",
+            mailgun_domain="mg.example.com",
         ),
         MailgunTransport,
     )
     assert isinstance(
-        build_transport(_settings(email_provider="mailtrap", mailtrap_api_token="token")),
+        _transport(email_provider="mailtrap", mailtrap_api_token="token"),
         MailtrapTransport,
     )
 
 
 def test_build_transport_reports_missing_provider_config() -> None:
     with pytest.raises(NotificationConfigError):
-        build_transport(_settings(email_provider="brevo"))
+        _transport(email_provider="brevo")
 
 
 def test_build_transport_rejects_cleartext_smtp_auth_on_remote_host() -> None:
     with pytest.raises(NotificationConfigError):
-        build_transport(
-            _settings(
-                smtp_host="smtp.example.com",
-                smtp_username="smtp-user",
-                smtp_password="smtp-password",
-                smtp_starttls=False,
-                smtp_ssl=False,
-            )
-        )
-
-
-def test_build_transport_allows_cleartext_smtp_auth_on_loopback() -> None:
-    transport = build_transport(
-        _settings(
-            smtp_host="localhost",
+        _transport(
+            smtp_host="smtp.example.com",
             smtp_username="smtp-user",
             smtp_password="smtp-password",
             smtp_starttls=False,
             smtp_ssl=False,
         )
+
+
+def test_build_transport_allows_cleartext_smtp_auth_on_loopback() -> None:
+    transport = _transport(
+        smtp_host="localhost",
+        smtp_username="smtp-user",
+        smtp_password="smtp-password",
+        smtp_starttls=False,
+        smtp_ssl=False,
     )
 
     assert isinstance(transport, SmtpTransport)
@@ -612,14 +621,7 @@ async def test_settings_endpoint_rejects_viewer(client, create_user, login) -> N
     assert response.status_code == 403
 
 
-class FakeTransport:
-    name = "fake"
-
-    async def send(self, message: OutboundEmail) -> None:
-        pass
-
-
-def _wiring_settings(enabled: bool) -> Settings:
+def _wiring_settings() -> Settings:
     return Settings(
         database_url="postgresql+asyncpg://user:pass@localhost:5432/uptime",
         first_admin_email="admin@example.com",
@@ -627,23 +629,14 @@ def _wiring_settings(enabled: bool) -> Settings:
         first_admin_name="Admin",
         jwt_secret="test-secret-that-is-long-enough-for-hs512-signing-and-at-least-32-bytes",
         scheduler_enabled=False,
-        email_notifications_enabled=enabled,
         email_from_address="alerts@example.com",
         notification_recipients=["ops@example.com"],
         smtp_host="smtp.example.com",
     )
 
 
-@pytest.mark.parametrize(
-    ("enabled", "runner_has_notifier"),
-    [(True, True), (False, False)],
-)
-def test_lifespan_wires_notifier_from_settings(
-    monkeypatch,
-    enabled: bool,
-    runner_has_notifier: bool,
-) -> None:
-    settings = _wiring_settings(enabled)
+def test_lifespan_always_wires_the_database_notifier(monkeypatch) -> None:
+    settings = _wiring_settings()
 
     @asynccontextmanager
     async def fake_session():
@@ -655,12 +648,344 @@ def test_lifespan_wires_notifier_from_settings(
     monkeypatch.setattr("app.main.get_settings", lambda: settings)
     monkeypatch.setattr("app.main.SessionLocal", fake_session)
     monkeypatch.setattr("app.main.seed_first_admin", fake_seed)
-    monkeypatch.setattr("app.main.build_transport", lambda _settings: FakeTransport())
     app.state.notifier = None
 
     with TestClient(app) as client:
         assert client.get("/openapi.json").status_code == 200
-        assert app.state.notifier is not None
-        assert (app.state.check_runner._notifier is not None) is runner_has_notifier
+        assert isinstance(app.state.notifier, DatabaseNotifier)
+        assert app.state.check_runner._notifier is app.state.notifier
 
     app.state.notifier = None
+
+
+async def test_settings_patch_saves_and_get_reads_the_database(client, create_user, login) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    saved = await client.patch(
+        "/api/v1/notifications/settings",
+        headers=headers,
+        json={
+            "enabled": True,
+            "provider": "smtp",
+            "from_address": "alerts@example.com",
+            "from_name": "Stored Alerts",
+            "recipients": ["ops@example.com", "oncall@example.com"],
+            "timeout_seconds": 15,
+            "smtp_host": "smtp.example.com",
+            "smtp_port": 587,
+            "smtp_starttls": True,
+            "smtp_ssl": False,
+            "smtp_username": "smtp-user",
+            "smtp_password": "super-secret-smtp-password",
+        },
+    )
+
+    assert saved.status_code == 200, saved.text
+    saved_body = saved.json()
+    assert saved_body["source"] == "database"
+    assert saved_body["configured"] is True
+    assert saved_body["enabled"] is True
+    assert saved_body["provider"] == "smtp"
+    assert saved_body["recipients"] == ["ops@example.com", "oncall@example.com"]
+    assert saved_body["smtp_username"] == "smtp-user"
+    assert saved_body["smtp_password_set"] is True
+    assert saved_body["from_name"] == "Stored Alerts"
+    assert saved_body["timeout_seconds"] == 15
+    assert "super-secret-smtp-password" not in saved.text
+
+    fetched = await client.get("/api/v1/notifications/settings", headers=headers)
+
+    assert fetched.status_code == 200, fetched.text
+    body = fetched.json()
+    assert body["source"] == "database"
+    assert body["enabled"] is True
+    assert body["recipients"] == ["ops@example.com", "oncall@example.com"]
+    assert body["smtp_password_set"] is True
+    assert "super-secret-smtp-password" not in fetched.text
+
+
+async def test_smtp_password_is_encrypted_at_rest(
+    client,
+    create_user,
+    login,
+    session_factory,
+    test_settings,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "provider": "smtp",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "smtp_host": "smtp.example.com",
+            "smtp_username": "smtp-user",
+            "smtp_password": "super-secret-smtp-password",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    async with session_factory() as session:
+        row = await session.get(NotificationSettings, 1)
+
+    assert row is not None
+    assert row.smtp_password_encrypted is not None
+    assert row.smtp_password_encrypted != "super-secret-smtp-password"
+    assert "super-secret-smtp-password" not in row.smtp_password_encrypted
+    assert (
+        decrypt_secret(row.smtp_password_encrypted, jwt_secret=test_settings.jwt_secret)
+        == "super-secret-smtp-password"
+    )
+
+
+async def test_patch_without_a_password_keeps_the_stored_secret(
+    client,
+    create_user,
+    login,
+    session_factory,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first = await client.patch(
+        "/api/v1/notifications/settings",
+        headers=headers,
+        json={
+            "provider": "smtp",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "smtp_host": "smtp.example.com",
+            "smtp_username": "smtp-user",
+            "smtp_password": "super-secret-smtp-password",
+        },
+    )
+    assert first.status_code == 200, first.text
+    async with session_factory() as session:
+        stored_before = (await session.get(NotificationSettings, 1)).smtp_password_encrypted
+
+    second = await client.patch(
+        "/api/v1/notifications/settings",
+        headers=headers,
+        json={"from_name": "Renamed Alerts"},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["smtp_password_set"] is True
+
+    async with session_factory() as session:
+        kept = await session.get(NotificationSettings, 1)
+    assert kept is not None
+    assert kept.smtp_password_encrypted == stored_before
+    assert kept.from_name == "Renamed Alerts"
+
+    cleared = await client.patch(
+        "/api/v1/notifications/settings",
+        headers=headers,
+        json={"smtp_username": ""},
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["smtp_username"] is None
+    assert cleared.json()["smtp_password_set"] is False
+
+    async with session_factory() as session:
+        after_clear = await session.get(NotificationSettings, 1)
+    assert after_clear is not None
+    assert after_clear.smtp_password_encrypted is None
+    assert after_clear.smtp_username is None
+
+
+async def test_settings_patch_rejects_viewer(client, create_user, login) -> None:
+    viewer = await create_user(email="viewer@example.com", password="viewer-password")
+    token = await login(viewer.email, "viewer-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"enabled": True},
+    )
+
+    assert response.status_code == 403
+
+
+async def test_settings_patch_rejects_remote_cleartext_smtp_auth(
+    client,
+    create_user,
+    login,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "provider": "smtp",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "smtp_host": "smtp.example.com",
+            "smtp_starttls": False,
+            "smtp_ssl": False,
+            "smtp_username": "smtp-user",
+            "smtp_password": "super-secret-smtp-password",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "super-secret-smtp-password" not in response.text
+
+
+async def test_settings_patch_rejects_empty_recipients(client, create_user, login) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "provider": "smtp",
+            "from_address": "alerts@example.com",
+            "recipients": [],
+            "smtp_host": "smtp.example.com",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+async def test_first_save_requires_provider_details(client, create_user, login) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"enabled": True},
+    )
+
+    assert response.status_code == 422
+
+
+async def test_settings_get_falls_back_to_environment(client, create_user, login) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.get(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "environment"
+    assert body["configured"] is False
+
+
+async def test_settings_get_reports_a_configured_environment(client, create_user, login) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+    configured = Settings(
+        database_url="postgresql+asyncpg://user:pass@localhost:5432/uptime",
+        first_admin_email="admin@example.com",
+        first_admin_password="test-admin-password",
+        first_admin_name="Admin",
+        jwt_secret="test-secret-that-is-long-enough-for-hs512-signing-and-at-least-32-bytes",
+        email_from_address="env@example.com",
+        notification_recipients=["env-ops@example.com"],
+        smtp_host="smtp.example.com",
+    )
+    app.dependency_overrides[get_settings] = lambda: configured
+
+    response = await client.get(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source"] == "environment"
+    assert body["configured"] is True
+    assert body["from_address"] == "env@example.com"
+    assert body["recipients"] == ["env-ops@example.com"]
+
+
+async def test_database_notifier_uses_the_saved_config(
+    session_factory,
+    test_settings,
+    monkeypatch,
+) -> None:
+    transport = RecordingTransport()
+    monkeypatch.setattr(
+        "app.notifications.service.build_transport",
+        lambda provider, timeout_seconds: transport,
+    )
+    async with session_factory() as session:
+        await save_notification_config(
+            session,
+            test_settings,
+            NotificationSettingsUpdate(
+                enabled=True,
+                provider="smtp",
+                from_address="stored@example.com",
+                from_name="Stored Alerts",
+                recipients=["stored-ops@example.com"],
+                smtp_host="smtp.example.com",
+            ),
+        )
+    notifier = DatabaseNotifier(session_factory, test_settings)
+    event = IncidentOpened(
+        monitor_id=uuid4(),
+        monitor_name="Stored",
+        monitor_url="https://example.com",
+        cause="Expected 200, got 503",
+        opened_at=datetime(2026, 11, 16, 12, 0, tzinfo=UTC),
+    )
+
+    await notifier.notify(event)
+
+    assert len(transport.messages) == 1
+    message = transport.messages[0]
+    assert message.recipients == ("stored-ops@example.com",)
+    assert message.sender_email == "stored@example.com"
+    assert message.sender_name == "Stored Alerts"
+    assert "[DOWN] Stored" in message.subject
+
+
+async def test_database_notifier_stays_silent_when_disabled(
+    session_factory,
+    test_settings,
+    monkeypatch,
+) -> None:
+    transport = RecordingTransport()
+    monkeypatch.setattr(
+        "app.notifications.service.build_transport",
+        lambda provider, timeout_seconds: transport,
+    )
+    async with session_factory() as session:
+        await save_notification_config(
+            session,
+            test_settings,
+            NotificationSettingsUpdate(
+                enabled=False,
+                provider="smtp",
+                from_address="stored@example.com",
+                recipients=["stored-ops@example.com"],
+                smtp_host="smtp.example.com",
+            ),
+        )
+    notifier = DatabaseNotifier(session_factory, test_settings)
+    event = IncidentOpened(
+        monitor_id=uuid4(),
+        monitor_name="Stored",
+        monitor_url="https://example.com",
+        cause="Expected 200, got 503",
+        opened_at=datetime(2026, 11, 16, 12, 0, tzinfo=UTC),
+    )
+
+    await notifier.notify(event)
+
+    assert transport.messages == []

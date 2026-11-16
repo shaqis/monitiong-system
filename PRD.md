@@ -100,6 +100,26 @@ Tracks downtime periods for accurate MTTR (Mean Time To Recovery) and incident h
 - `resolved_at`: `TIMESTAMPTZ` (Nullable — `NULL` means ongoing incident)
 - `cause`: `TEXT` (Not Null)
 
+### 4.5 `notification_settings`
+
+Single-row admin-managed email configuration. When the row is absent the worker falls back to the environment variables in section 5.5.
+
+- `id`: `SMALLINT` (PK, `CHECK id = 1`)
+- `enabled`: `BOOLEAN` (Not Null, default `false`)
+- `provider`: `VARCHAR(20)` (Not Null, default `'smtp'` — `CHECK provider IN ('smtp', 'brevo')`)
+- `from_address`: `VARCHAR(255)` (Not Null)
+- `from_name`: `VARCHAR(120)` (Not Null)
+- `recipients`: `VARCHAR(255)[]` (Not Null, default `'{}'`)
+- `timeout_seconds`: `DOUBLE PRECISION` (Not Null, default `10`)
+- `smtp_host`: `VARCHAR(255)` (Nullable)
+- `smtp_port`: `INTEGER` (Not Null, default `587`, `CHECK smtp_port BETWEEN 1 AND 65535`)
+- `smtp_starttls`: `BOOLEAN` (Not Null, default `true`)
+- `smtp_ssl`: `BOOLEAN` (Not Null, default `false`, `CHECK NOT (smtp_starttls AND smtp_ssl)`)
+- `smtp_username`: `VARCHAR(255)` (Nullable)
+- `smtp_password_encrypted`: `TEXT` (Nullable — Fernet token, never plaintext)
+- `brevo_api_key_encrypted`: `TEXT` (Nullable — Fernet token, never plaintext)
+- `updated_at`: `TIMESTAMPTZ` (Not Null, default `now()`)
+
 ## 5. Functional Requirements
 
 ### 5.1 Authentication & Bootstrap
@@ -144,14 +164,16 @@ Provides a high-level operational overview with a global time-range selector (`1
   - Reset user password.
   - Guardrail: Prevent an admin from deactivating or demoting their own account if they are the last active `admin`.
 
-### 5.5 Email Notifications (Admin, Environment Configured)
+### 5.5 Email Notifications (Admin, Database Configured)
 
-Sends an operational email when an incident opens or resolves. This phase adds no database table. Credentials live only in the deployment environment. A read-only admin page shows the effective configuration and can send a test email.
+Sends an operational email when an incident opens or resolves. Settings live in the single-row `notification_settings` table and are edited on the admin **Settings** page. The effective configuration is resolved on every send, so a saved change takes effect without a restart. When no row exists, the environment variables below are the fallback.
 
-- **Transport selection**: `EMAIL_PROVIDER` is one of `smtp`, `brevo`, `mailgun`, or `mailtrap`. Every transport implements one `EmailTransport` interface, so the worker and the API do not branch on the provider.
-- **Enablement**: `EMAIL_NOTIFICATIONS_ENABLED` (default `false`). When false, incident emails are not sent. The admin test endpoint still works when transport configuration is complete, so an operator can verify credentials before enabling alerts.
+- **Storage**: one row (`id = 1`). `smtp` and `brevo` are editable from the UI. `mailgun` and `mailtrap` remain environment-only providers.
+- **Secrets at rest**: `smtp_password` and `brevo_api_key` are encrypted with Fernet using a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` makes the saved secrets undecryptable; re-enter them on the settings page.
+- **Transport selection**: `EMAIL_PROVIDER` sets the fallback provider and is one of `smtp`, `brevo`, `mailgun`, or `mailtrap`. A saved row overrides it. Every transport implements one `EmailTransport` interface, so the worker and the API do not branch on the provider.
+- **Enablement**: `EMAIL_NOTIFICATIONS_ENABLED` (default `false`) or the saved row's toggle. When false, incident emails are not sent. The admin test endpoint still works when transport configuration is complete, so an operator can verify credentials before enabling alerts.
 - **Sender**: `EMAIL_FROM_ADDRESS` and `EMAIL_FROM_NAME` (default `Uptime Monitor`).
-- **Recipients**: `NOTIFICATION_RECIPIENTS` is a JSON list of addresses, for example `["ops@example.com","oncall@example.com"]`. It is required when alerts are enabled.
+- **Recipients**: `NOTIFICATION_RECIPIENTS` is a JSON list of addresses, for example `["ops@example.com","oncall@example.com"]`. It is required when alerts are enabled. The settings page accepts the same list separated by commas or new lines.
 - **SMTP**: `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_STARTTLS` (default `true`), `SMTP_SSL` (default `false`). StartTLS and implicit TLS are mutually exclusive.
 - **Brevo**: `BREVO_API_KEY`.
 - **Mailgun**: `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_API_URL` (default `https://api.mailgun.net/v3`; set `https://api.eu.mailgun.net/v3` for the EU region).
@@ -161,7 +183,7 @@ Sends an operational email when an incident opens or resolves. This phase adds n
   - **Incident resolved**: after a successful check closes the open incident. The message names the monitor, URL, resolution time, and duration.
   - A first failed check (`DEGRADED`) does not send email. Further failures on an open incident do not resend it.
 - **Delivery semantics**: best effort, one message per transition, sent after the database transaction commits. A delivery failure is logged and never changes the check result, monitor status, or incident. This phase has no retry queue and no delivery table.
-- **Secrets**: never returned by an API, never logged, and never written to the database.
+- **Secrets**: never returned by an API, never logged, and never stored in plaintext.
 
 ## 6. Background Monitoring Engine Rules
 
@@ -212,8 +234,9 @@ All endpoints are prefixed with `/api/v1`.
 
 ### Notifications
 
-- `GET /notifications/settings` — Return the effective email configuration with secret values omitted (`admin` only).
-- `POST /notifications/test` — Send a test email to `NOTIFICATION_RECIPIENTS` through the configured transport (`admin` only). Returns `204 No Content` when the provider accepted the message, `503 Service Unavailable` when transport configuration is incomplete, and `502 Bad Gateway` when the provider rejects or cannot be reached.
+- `GET /notifications/settings` — Return the effective email configuration with secret values omitted (`admin` only). The response reports `source` as `database` when the saved row is in use, otherwise `environment`, plus `smtp_password_set` and `brevo_api_key_set` flags.
+- `PATCH /notifications/settings` — Save `smtp` or `brevo` settings, sender details, and recipients (`admin` only). Returns the same body as `GET`. Missing or invalid provider details return `422 Unprocessable Entity`; an empty recipients list is rejected. Blank secret fields keep the stored value, and clearing the SMTP username clears the stored password.
+- `POST /notifications/test` — Send a test email to the saved recipients through the effective transport (`admin` only). Returns `204 No Content` when the provider accepted the message, `503 Service Unavailable` when transport configuration is incomplete, and `502 Bad Gateway` when the provider rejects or cannot be reached.
 
 ## 8. Suggested Repository Structure
 
@@ -277,4 +300,4 @@ Execute and verify in strict sequential order:
 3. **Phase 3 — Monitoring Engine & Monitor API**: Implement `prober.py` (HTTP status, latency, keyword check, SSL expiry), `scheduler.py` (with 2-strike failure threshold and incident lifecycle), and `/api/v1/monitors` + `/api/v1/dashboard` endpoints.
 4. **Phase 4 — Next.js Frontend**: Scaffold Next.js App Router with Tailwind + Shadcn/UI, build authentication flow, role-aware navigation sidebar, Analytics Dashboard with Recharts, URL Management CRUD + Detail view, and Admin User Management page.
 5. **Phase 5 — End-to-End Verification**: Run full stack via Docker Compose, verify login as both `admin` and `viewer`, add test URLs (valid `200` URL, invalid keyword URL, unreachable URL), confirm incident creation/recovery, and validate dashboard metrics.
-6. **Phase 6 — Email Notifications**: Implement the four transport adapters, incident open/resolve dispatch after commit, environment validation, the admin test-send endpoint, and the read-only admin settings page. Verify with pytest: each provider payload, one email per transition, silent first-failure, replica-conflict suppression, failure isolation from check recording, and RBAC on the notification endpoints.
+6. **Phase 6 — Email Notifications**: Implement the four transport adapters, incident open/resolve dispatch after commit, environment fallback validation, the admin test-send endpoint, and the editable admin settings page backed by `notification_settings`. Verify with pytest: each provider payload, one email per transition, silent first-failure, replica-conflict suppression, failure isolation from check recording, encrypted secrets, and RBAC on the notification endpoints.
