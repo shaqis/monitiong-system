@@ -106,7 +106,7 @@ Single-row admin-managed email configuration. When the row is absent the worker 
 
 - `id`: `SMALLINT` (PK, `CHECK id = 1`)
 - `enabled`: `BOOLEAN` (Not Null, default `false`)
-- `provider`: `VARCHAR(20)` (Not Null, default `'smtp'` — `CHECK provider IN ('smtp', 'brevo')`)
+- `provider`: `VARCHAR(20)` (Not Null, default `'smtp'` — `CHECK provider IN ('smtp', 'brevo', 'mailgun', 'mailtrap')`)
 - `from_address`: `VARCHAR(255)` (Not Null)
 - `from_name`: `VARCHAR(120)` (Not Null)
 - `recipients`: `VARCHAR(255)[]` (Not Null, default `'{}'`)
@@ -118,6 +118,10 @@ Single-row admin-managed email configuration. When the row is absent the worker 
 - `smtp_username`: `VARCHAR(255)` (Nullable)
 - `smtp_password_encrypted`: `TEXT` (Nullable — Fernet token, never plaintext)
 - `brevo_api_key_encrypted`: `TEXT` (Nullable — Fernet token, never plaintext)
+- `mailgun_api_key_encrypted`: `TEXT` (Nullable — Fernet token, never plaintext)
+- `mailgun_domain`: `VARCHAR(255)` (Nullable — sending domain, required when the provider is `mailgun`)
+- `mailgun_api_url`: `VARCHAR(255)` (Nullable — defaults to `https://api.mailgun.net/v3`)
+- `mailtrap_api_token_encrypted`: `TEXT` (Nullable — Fernet token, never plaintext)
 - `updated_at`: `TIMESTAMPTZ` (Not Null, default `now()`)
 
 ## 5. Functional Requirements
@@ -168,16 +172,16 @@ Provides a high-level operational overview with a global time-range selector (`1
 
 Sends an operational email when an incident opens or resolves. Settings live in the single-row `notification_settings` table and are edited on the admin **Settings** page. The effective configuration is resolved on every send, so a saved change takes effect without a restart. When no row exists, the environment variables below are the fallback.
 
-- **Storage**: one row (`id = 1`). `smtp` and `brevo` are editable from the UI. `mailgun` and `mailtrap` remain environment-only providers.
-- **Secrets at rest**: `smtp_password` and `brevo_api_key` are encrypted with Fernet using a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` makes the saved secrets undecryptable; re-enter them on the settings page.
+- **Storage**: one row (`id = 1`). `smtp`, `brevo`, `mailgun`, and `mailtrap` are all editable from the UI. When no row exists, the environment variables below are the fallback.
+- **Secrets at rest**: `smtp_password`, `brevo_api_key`, `mailgun_api_key`, and `mailtrap_api_token` are encrypted with Fernet using a key derived from `JWT_SECRET`. Rotating `JWT_SECRET` makes the saved secrets undecryptable; re-enter them on the settings page. Secret fields are write-only: leaving one blank on save keeps the stored value, and switching provider is the way to stop using it.
 - **Transport selection**: `EMAIL_PROVIDER` sets the fallback provider and is one of `smtp`, `brevo`, `mailgun`, or `mailtrap`. A saved row overrides it. Every transport implements one `EmailTransport` interface, so the worker and the API do not branch on the provider.
 - **Enablement**: `EMAIL_NOTIFICATIONS_ENABLED` (default `false`) or the saved row's toggle. When false, incident emails are not sent. The admin test endpoint still works when transport configuration is complete, so an operator can verify credentials before enabling alerts.
 - **Sender**: `EMAIL_FROM_ADDRESS` and `EMAIL_FROM_NAME` (default `Uptime Monitor`).
 - **Recipients**: `NOTIFICATION_RECIPIENTS` is a JSON list of addresses, for example `["ops@example.com","oncall@example.com"]`. It is required when alerts are enabled. The settings page accepts the same list separated by commas or new lines.
 - **SMTP**: `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_STARTTLS` (default `true`), `SMTP_SSL` (default `false`). StartTLS and implicit TLS are mutually exclusive.
 - **Brevo**: `BREVO_API_KEY`.
-- **Mailgun**: `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_API_URL` (default `https://api.mailgun.net/v3`; set `https://api.eu.mailgun.net/v3` for the EU region).
-- **Mailtrap**: `MAILTRAP_API_TOKEN` (Mailtrap sending API, `https://send.api.mailtrap.io/api/send`).
+- **Mailgun**: `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, and `MAILGUN_API_URL` (default `https://api.mailgun.net/v3`; set `https://api.eu.mailgun.net/v3` for the EU region). The settings page stores the key, domain, and optional API URL; a blank API URL uses the default endpoint.
+- **Mailtrap**: `MAILTRAP_API_TOKEN` (Mailtrap sending API, `https://send.api.mailtrap.io/api/send`). The settings page stores the sending API token.
 - **Events**:
   - **Incident opened**: after the second consecutive failed check commits. The message names the monitor, URL, failure cause, and start time.
   - **Incident resolved**: after a successful check closes the open incident. The message names the monitor, URL, resolution time, and duration.
@@ -234,8 +238,8 @@ All endpoints are prefixed with `/api/v1`.
 
 ### Notifications
 
-- `GET /notifications/settings` — Return the effective email configuration with secret values omitted (`admin` only). The response reports `source` as `database` when the saved row is in use, otherwise `environment`, plus `smtp_password_set` and `brevo_api_key_set` flags.
-- `PATCH /notifications/settings` — Save `smtp` or `brevo` settings, sender details, and recipients (`admin` only). Returns the same body as `GET`. Missing or invalid provider details return `422 Unprocessable Entity`; an empty recipients list is rejected. Blank secret fields keep the stored value, and clearing the SMTP username clears the stored password.
+- `GET /notifications/settings` — Return the effective email configuration with secret values omitted (`admin` only). The response reports `source` as `database` when the saved row is in use, otherwise `environment`, plus `smtp_password_set`, `brevo_api_key_set`, `mailgun_api_key_set`, and `mailtrap_api_token_set` flags, the Mailgun domain and API URL, and whether the selected provider's credentials are set.
+- `PATCH /notifications/settings` — Save any of the four providers, sender details, and recipients (`admin` only). Returns the same body as `GET`. Missing or invalid provider details return `422 Unprocessable Entity`; a Mailgun save requires a domain, and an empty recipients list is rejected. Blank secret fields keep the stored value, and clearing the SMTP username clears the stored password.
 - `POST /notifications/test` — Send a test email to the saved recipients through the effective transport (`admin` only). Returns `204 No Content` when the provider accepted the message, `503 Service Unavailable` when transport configuration is incomplete, and `502 Bad Gateway` when the provider rejects or cannot be reached.
 
 ## 8. Suggested Repository Structure
