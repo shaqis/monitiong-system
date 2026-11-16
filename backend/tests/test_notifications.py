@@ -857,6 +857,19 @@ async def test_settings_patch_rejects_empty_recipients(client, create_user, logi
     assert response.status_code == 422
 
 
+async def test_first_save_requires_provider_details(client, create_user, login) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+
+    response = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"enabled": True},
+    )
+
+    assert response.status_code == 422
+
+
 async def test_settings_get_falls_back_to_environment(client, create_user, login) -> None:
     admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
     token = await login(admin.email, "admin-password")
