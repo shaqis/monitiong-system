@@ -306,3 +306,42 @@ def test_settings_treat_blank_optional_email_values_as_unset() -> None:
     assert settings.smtp_host is None
     assert settings.smtp_password is None
     assert settings.mailgun_api_key is None
+
+
+def test_settings_treat_blank_recipients_as_empty(monkeypatch) -> None:
+    monkeypatch.setenv("NOTIFICATION_RECIPIENTS", "")
+
+    settings = build_settings()
+
+    assert settings.notification_recipients == []
+
+
+def test_settings_reject_cleartext_smtp_auth_on_remote_host() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(
+            email_notifications_enabled=True,
+            email_from_address="alerts@example.com",
+            notification_recipients=["ops@example.com"],
+            smtp_host="smtp.example.com",
+            smtp_username="smtp-user",
+            smtp_password="smtp-password",
+            smtp_starttls=False,
+            smtp_ssl=False,
+        )
+
+    assert "loopback" in str(exc_info.value)
+
+
+def test_settings_allow_cleartext_smtp_auth_on_loopback() -> None:
+    settings = build_settings(
+        email_notifications_enabled=True,
+        email_from_address="alerts@example.com",
+        notification_recipients=["ops@example.com"],
+        smtp_host="127.0.0.1",
+        smtp_username="smtp-user",
+        smtp_password="smtp-password",
+        smtp_starttls=False,
+        smtp_ssl=False,
+    )
+
+    assert settings.smtp_host == "127.0.0.1"

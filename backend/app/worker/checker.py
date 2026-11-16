@@ -85,6 +85,7 @@ class CheckRunner:
         user_agent: str = DEFAULT_USER_AGENT,
         ssl_inspect_timeout_seconds: float = DEFAULT_SSL_INSPECT_TIMEOUT_SECONDS,
         notifier: IncidentNotifier | None = None,
+        notification_timeout_seconds: float = 10.0,
     ) -> None:
         self._session_factory = session_factory
         self._prober = prober
@@ -94,6 +95,7 @@ class CheckRunner:
         self._user_agent = user_agent
         self._ssl_inspect_timeout_seconds = ssl_inspect_timeout_seconds
         self._notifier = notifier
+        self._notification_timeout_seconds = notification_timeout_seconds
 
     def aclose(self) -> None:
         self._ssl_executor.shutdown(wait=False, cancel_futures=True)
@@ -112,15 +114,17 @@ class CheckRunner:
                     ssl_executor=self._ssl_executor,
                 )
                 outcome = await self._record(monitor_id, snapshot, result)
-                if outcome.event is not None and self._notifier is not None:
-                    try:
+
+            if outcome.event is not None and self._notifier is not None:
+                try:
+                    async with asyncio.timeout(self._notification_timeout_seconds):
                         await self._notifier.notify(outcome.event)
-                    except Exception:
-                        logger.exception(
-                            "Incident notification failed",
-                            extra={"monitor_id": str(monitor_id)},
-                        )
-                return outcome.check
+                except Exception:
+                    logger.exception(
+                        "Incident notification failed",
+                        extra={"monitor_id": str(monitor_id)},
+                    )
+            return outcome.check
         finally:
             self._inflight.discard(monitor_id)
 
