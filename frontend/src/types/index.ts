@@ -26,4 +26,10 @@ export type {
   MonitorStatusStrip,
 } from "./dashboard";
 export type { UserCreateInput, UserUpdateInput } from "./user";
-export type { NotificationProvider, NotificationSettings } from "./notification";
+export type {
+  EditableNotificationProvider,
+  NotificationProvider,
+  NotificationSettings,
+  NotificationSettingsSource,
+  NotificationSettingsUpdate,
+} from "./notification";
