@@ -3,8 +3,18 @@ from html import escape
 from typing import Protocol
 from urllib.parse import urlsplit, urlunsplit
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.core.config import Settings
+from app.notifications.config import NotificationConfig
 from app.notifications.events import IncidentEvent, IncidentOpened, IncidentResolved
-from app.notifications.transports import EmailTransport, OutboundEmail
+from app.notifications.settings_store import load_notification_config
+from app.notifications.transports import (
+    EmailTransport,
+    NotificationConfigError,
+    OutboundEmail,
+    build_transport,
+)
 
 
 class IncidentNotifier(Protocol):
@@ -119,3 +129,44 @@ class NotificationService:
                 ),
             )
         )
+
+
+class DatabaseNotifier:
+    """Resolve the effective notification config from the database on every send.
+
+    The row is optional: when it is absent the environment configuration applies.
+    Saving on the settings page therefore takes effect without a restart.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        settings: Settings,
+    ) -> None:
+        self._session_factory = session_factory
+        self._settings = settings
+
+    async def _load(self) -> NotificationConfig | None:
+        async with self._session_factory() as session:
+            return await load_notification_config(session, self._settings)
+
+    def _service(self, config: NotificationConfig) -> NotificationService:
+        transport = build_transport(config.provider, config.timeout_seconds)
+        return NotificationService(
+            transport,
+            sender_email=config.sender_email,
+            sender_name=config.sender_name,
+            recipients=config.recipients,
+        )
+
+    async def notify(self, event: IncidentEvent) -> None:
+        config = await self._load()
+        if config is None or not config.enabled:
+            return
+        await self._service(config).notify(event)
+
+    async def send_test(self) -> None:
+        config = await self._load()
+        if config is None:
+            raise NotificationConfigError("Email notifications are not configured")
+        await self._service(config).send_test()

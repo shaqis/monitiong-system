@@ -5,11 +5,18 @@ from typing import Any, Protocol
 import aiosmtplib
 import httpx
 
-from app.core.config import Settings, is_loopback_host
+from app.core.config import is_loopback_host
+from app.notifications.config import (
+    BrevoConfig,
+    MailgunConfig,
+    MailtrapConfig,
+    ProviderConfig,
+    SmtpConfig,
+)
 
 
 class NotificationConfigError(ValueError):
-    """The selected transport is missing required environment configuration."""
+    """The selected transport is missing required configuration."""
 
 
 class EmailTransportError(Exception):
@@ -194,72 +201,62 @@ class MailtrapTransport(_HttpTransport):
         )
 
 
-def build_transport(settings: Settings) -> EmailTransport:
-    if settings.email_from_address is None:
-        raise NotificationConfigError(
-            "EMAIL_FROM_ADDRESS is required when email notifications are configured"
-        )
-
-    timeout = settings.notification_timeout_seconds
-
-    if settings.email_provider == "smtp":
-        if settings.smtp_host is None:
+def build_transport(provider: ProviderConfig, timeout_seconds: float) -> EmailTransport:
+    if isinstance(provider, SmtpConfig):
+        if provider.host is None:
             raise NotificationConfigError("SMTP_HOST is required when EMAIL_PROVIDER is smtp")
-        if settings.smtp_starttls and settings.smtp_ssl:
+        if provider.start_tls and provider.use_tls:
             raise NotificationConfigError("SMTP_STARTTLS and SMTP_SSL cannot both be true")
-        username = settings.smtp_username
-        password = (
-            settings.smtp_password.get_secret_value()
-            if settings.smtp_password is not None
-            else None
-        )
-        if (username is None) != (password is None):
+        if (provider.username is None) != (provider.password is None):
             raise NotificationConfigError("SMTP_USERNAME and SMTP_PASSWORD must be set together")
         if (
-            username is not None
-            and not settings.smtp_starttls
-            and not settings.smtp_ssl
-            and not is_loopback_host(settings.smtp_host)
+            provider.username is not None
+            and not provider.start_tls
+            and not provider.use_tls
+            and not is_loopback_host(provider.host)
         ):
             raise NotificationConfigError(
                 "SMTP_USERNAME requires SMTP_STARTTLS or SMTP_SSL unless "
                 "SMTP_HOST is a loopback host"
             )
         return SmtpTransport(
-            host=settings.smtp_host,
-            port=settings.smtp_port,
-            username=username,
-            password=password,
-            start_tls=settings.smtp_starttls,
-            use_tls=settings.smtp_ssl,
-            timeout_seconds=timeout,
+            host=provider.host,
+            port=provider.port,
+            username=provider.username,
+            password=provider.password,
+            start_tls=provider.start_tls,
+            use_tls=provider.use_tls,
+            timeout_seconds=timeout_seconds,
         )
 
-    if settings.email_provider == "brevo":
-        if settings.brevo_api_key is None:
+    if isinstance(provider, BrevoConfig):
+        if provider.api_key is None:
             raise NotificationConfigError("BREVO_API_KEY is required when EMAIL_PROVIDER is brevo")
         return BrevoTransport(
-            api_key=settings.brevo_api_key.get_secret_value(),
-            timeout_seconds=timeout,
+            api_key=provider.api_key,
+            timeout_seconds=timeout_seconds,
         )
 
-    if settings.email_provider == "mailgun":
-        if settings.mailgun_api_key is None or settings.mailgun_domain is None:
+    if isinstance(provider, MailgunConfig):
+        if provider.api_key is None or provider.domain is None:
             raise NotificationConfigError(
                 "MAILGUN_API_KEY and MAILGUN_DOMAIN are required when EMAIL_PROVIDER is mailgun"
             )
         return MailgunTransport(
-            api_key=settings.mailgun_api_key.get_secret_value(),
-            domain=settings.mailgun_domain,
-            api_url=settings.mailgun_api_url,
-            timeout_seconds=timeout,
+            api_key=provider.api_key,
+            domain=provider.domain,
+            api_url=provider.api_url,
+            timeout_seconds=timeout_seconds,
         )
 
-    if settings.mailtrap_api_token is None:
+    if not isinstance(provider, MailtrapConfig):
+        raise NotificationConfigError("Unsupported email provider")
+
+    if provider.api_token is None:
         raise NotificationConfigError(
             "MAILTRAP_API_TOKEN is required when EMAIL_PROVIDER is mailtrap"
         )
     return MailtrapTransport(
-        api_token=settings.mailtrap_api_token.get_secret_value(),
-        timeout_seconds=timeout,
+        api_token=provider.api_token,
+        timeout_seconds=timeout_seconds,
     )

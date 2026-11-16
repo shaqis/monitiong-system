@@ -6,15 +6,18 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     Uuid,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -164,6 +167,48 @@ class Incident(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cause: Mapped[str] = mapped_column(Text)
+
+
+class NotificationSettings(Base):
+    __tablename__ = "notification_settings"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_notification_settings_singleton"),
+        CheckConstraint(
+            "provider IN ('smtp', 'brevo')",
+            name="ck_notification_settings_provider",
+        ),
+        CheckConstraint(
+            "smtp_port BETWEEN 1 AND 65535",
+            name="ck_notification_settings_smtp_port",
+        ),
+        CheckConstraint(
+            "NOT (smtp_starttls AND smtp_ssl)",
+            name="ck_notification_settings_smtp_tls",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, server_default=text("1"))
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    provider: Mapped[str] = mapped_column(String(20), server_default=text("'smtp'"))
+    from_address: Mapped[str] = mapped_column(String(255))
+    from_name: Mapped[str] = mapped_column(String(120))
+    recipients: Mapped[list[str]] = mapped_column(
+        ARRAY(String(255)),
+        server_default=text("'{}'::varchar[]"),
+    )
+    timeout_seconds: Mapped[float] = mapped_column(Float, server_default=text("10"))
+    smtp_host: Mapped[str | None] = mapped_column(String(255))
+    smtp_port: Mapped[int] = mapped_column(Integer, server_default=text("587"))
+    smtp_starttls: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    smtp_ssl: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    smtp_username: Mapped[str | None] = mapped_column(String(255))
+    smtp_password_encrypted: Mapped[str | None] = mapped_column(Text)
+    brevo_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
 
 Index("ix_users_email_lower", func.lower(User.email), unique=True)
