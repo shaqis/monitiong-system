@@ -16,6 +16,63 @@ import type {
 
 export type EncryptionMode = "starttls" | "ssl" | "none";
 
+type SecretSetKey =
+  | "smtp_password_set"
+  | "brevo_api_key_set"
+  | "mailgun_api_key_set"
+  | "mailtrap_api_token_set";
+
+type SecretFormKey =
+  | "smtpPassword"
+  | "brevoApiKey"
+  | "mailgunApiKey"
+  | "mailtrapApiToken";
+
+type SecretErrorKey =
+  | "smtp_password"
+  | "brevo_api_key"
+  | "mailgun_api_key"
+  | "mailtrap_api_token";
+
+export interface ProviderSecretMeta {
+  setKey: SecretSetKey;
+  formKey: SecretFormKey;
+  errorKey: SecretErrorKey;
+  placeholderWhenUnset: string;
+  label: string;
+}
+
+export const PROVIDER_SECRET_META: Record<EditableNotificationProvider, ProviderSecretMeta> = {
+  smtp: {
+    setKey: "smtp_password_set",
+    formKey: "smtpPassword",
+    errorKey: "smtp_password",
+    placeholderWhenUnset: "Enter password",
+    label: "SMTP password",
+  },
+  brevo: {
+    setKey: "brevo_api_key_set",
+    formKey: "brevoApiKey",
+    errorKey: "brevo_api_key",
+    placeholderWhenUnset: "xkeysib-…",
+    label: "Brevo API key",
+  },
+  mailgun: {
+    setKey: "mailgun_api_key_set",
+    formKey: "mailgunApiKey",
+    errorKey: "mailgun_api_key",
+    placeholderWhenUnset: "key-…",
+    label: "Mailgun API key",
+  },
+  mailtrap: {
+    setKey: "mailtrap_api_token_set",
+    formKey: "mailtrapApiToken",
+    errorKey: "mailtrap_api_token",
+    placeholderWhenUnset: "Enter API token",
+    label: "Mailtrap API token",
+  },
+};
+
 export interface ProviderFields {
   provider: EditableNotificationProvider;
   smtpHost: string;
@@ -59,6 +116,42 @@ function FieldError({ message }: { message: string | undefined }) {
     return null;
   }
   return <p className="text-xs text-red-600">{message}</p>;
+}
+
+function secretPlaceholder(
+  provider: EditableNotificationProvider,
+  settings: NotificationSettings,
+): string {
+  const meta = PROVIDER_SECRET_META[provider];
+  if (settings[meta.setKey]) {
+    return "unchanged";
+  }
+  if (settings.unreadable_secrets.includes(provider)) {
+    return "Re-enter secret";
+  }
+  return meta.placeholderWhenUnset;
+}
+
+function SecretHelperText({
+  provider,
+  settings,
+  defaultText,
+}: {
+  provider: EditableNotificationProvider;
+  settings: NotificationSettings;
+  defaultText: string;
+}) {
+  const meta = PROVIDER_SECRET_META[provider];
+  if (!settings[meta.setKey] && settings.unreadable_secrets.includes(provider)) {
+    return (
+      <p className="text-xs text-amber-700">
+        Saved {meta.label} cannot be decrypted after <code>JWT_SECRET</code> rotation and must be
+        re-entered.
+        {provider === "smtp" ? " Clear the username to use unauthenticated SMTP." : ""}
+      </p>
+    );
+  }
+  return <p className="text-xs text-muted-foreground">{defaultText}</p>;
 }
 
 export function NotificationProviderFields({
@@ -173,15 +266,19 @@ export function NotificationProviderFields({
                 type="password"
                 value={fields.smtpPassword}
                 onChange={(event) => onChange("smtpPassword", event.target.value)}
-                placeholder={settings.smtp_password_set ? "unchanged" : "Enter password"}
+                placeholder={secretPlaceholder("smtp", settings)}
                 disabled={disabled}
                 autoComplete="new-password"
               />
-              <p className="text-xs text-muted-foreground">
-                {settings.smtp_password_set
-                  ? "Leave blank to keep the saved password."
-                  : "Stored encrypted; required when a username is set."}
-              </p>
+              <SecretHelperText
+                provider="smtp"
+                settings={settings}
+                defaultText={
+                  settings.smtp_password_set
+                    ? "Leave blank to keep the saved password."
+                    : "Stored encrypted; required when a username is set."
+                }
+              />
               <FieldError message={fieldErrors.smtp_password} />
             </div>
           </div>
@@ -196,14 +293,17 @@ export function NotificationProviderFields({
             type="password"
             value={fields.brevoApiKey}
             onChange={(event) => onChange("brevoApiKey", event.target.value)}
-            placeholder={settings.brevo_api_key_set ? "unchanged" : "xkeysib-…"}
+            placeholder={secretPlaceholder("brevo", settings)}
             disabled={disabled}
             autoComplete="new-password"
           />
-          <p className="text-xs text-muted-foreground">
-            Find the key in Brevo under SMTP &amp; API → API keys.
-            {settings.brevo_api_key_set ? " Leave blank to keep the saved key." : ""}
-          </p>
+          <SecretHelperText
+            provider="brevo"
+            settings={settings}
+            defaultText={`Find the key in Brevo under SMTP & API → API keys.${
+              settings.brevo_api_key_set ? " Leave blank to keep the saved key." : ""
+            }`}
+          />
           <FieldError message={fieldErrors.brevo_api_key} />
         </div>
       ) : null}
@@ -217,14 +317,17 @@ export function NotificationProviderFields({
               type="password"
               value={fields.mailgunApiKey}
               onChange={(event) => onChange("mailgunApiKey", event.target.value)}
-              placeholder={settings.mailgun_api_key_set ? "unchanged" : "key-…"}
+              placeholder={secretPlaceholder("mailgun", settings)}
               disabled={disabled}
               autoComplete="new-password"
             />
-            <p className="text-xs text-muted-foreground">
-              Find the key in Mailgun under Account settings → API security.
-              {settings.mailgun_api_key_set ? " Leave blank to keep the saved key." : ""}
-            </p>
+            <SecretHelperText
+              provider="mailgun"
+              settings={settings}
+              defaultText={`Find the key in Mailgun under Account settings → API security.${
+                settings.mailgun_api_key_set ? " Leave blank to keep the saved key." : ""
+              }`}
+            />
             <FieldError message={fieldErrors.mailgun_api_key} />
           </div>
 
@@ -272,14 +375,17 @@ export function NotificationProviderFields({
             type="password"
             value={fields.mailtrapApiToken}
             onChange={(event) => onChange("mailtrapApiToken", event.target.value)}
-            placeholder={settings.mailtrap_api_token_set ? "unchanged" : "Enter API token"}
+            placeholder={secretPlaceholder("mailtrap", settings)}
             disabled={disabled}
             autoComplete="new-password"
           />
-          <p className="text-xs text-muted-foreground">
-            Use the Mailtrap sending API token.
-            {settings.mailtrap_api_token_set ? " Leave blank to keep the saved token." : ""}
-          </p>
+          <SecretHelperText
+            provider="mailtrap"
+            settings={settings}
+            defaultText={`Use the Mailtrap sending API token.${
+              settings.mailtrap_api_token_set ? " Leave blank to keep the saved token." : ""
+            }`}
+          />
           <FieldError message={fieldErrors.mailtrap_api_token} />
         </div>
       ) : null}

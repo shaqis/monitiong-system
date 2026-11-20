@@ -28,6 +28,7 @@ class NotificationSettingsResponse(BaseModel):
     mailgun_api_key_set: bool
     mailtrap_api_token_set: bool
     provider_credentials_set: bool
+    unreadable_secrets: list[NotificationProviderValue] = Field(default_factory=list)
 
 
 class NotificationSettingsUpdate(BaseModel):

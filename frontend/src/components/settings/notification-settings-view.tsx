@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Loader2, Send } from "lucide-react";
 import {
   NotificationProviderFields,
+  PROVIDER_SECRET_META,
   type EncryptionMode,
   type ProviderFields,
 } from "@/components/settings/notification-provider-fields";
@@ -88,6 +89,26 @@ function FieldError({ message }: { message: string | undefined }) {
   return <p className="text-xs text-red-600">{message}</p>;
 }
 
+function validateProviderSecrets(
+  form: FormState,
+  current: NotificationSettings,
+): Record<string, string> {
+  if (form.provider === "smtp" && form.smtpUsername.trim().length === 0) {
+    return {};
+  }
+  const meta = PROVIDER_SECRET_META[form.provider];
+  const hasInput = form[meta.formKey].trim().length > 0;
+  if (hasInput || current[meta.setKey]) {
+    return {};
+  }
+  const isUnreadable = current.unreadable_secrets.includes(form.provider);
+  return {
+    [meta.errorKey]: isUnreadable
+      ? `Re-enter the ${meta.label} to replace the undecryptable value.`
+      : `${meta.label} is required.`,
+  };
+}
+
 export function NotificationSettingsView({ settings }: NotificationSettingsViewProps) {
   const router = useRouter();
   const [current, setCurrent] = useState<NotificationSettings>(settings);
@@ -140,21 +161,14 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
       input.smtp_starttls = form.encryption === "starttls";
       input.smtp_ssl = form.encryption === "ssl";
       input.smtp_username = form.smtpUsername.trim() || null;
-      if (form.smtpPassword.length > 0) {
-        input.smtp_password = form.smtpPassword;
-      }
-    } else if (form.provider === "brevo") {
-      if (form.brevoApiKey.length > 0) {
-        input.brevo_api_key = form.brevoApiKey;
-      }
     } else if (form.provider === "mailgun") {
-      if (form.mailgunApiKey.length > 0) {
-        input.mailgun_api_key = form.mailgunApiKey;
-      }
       input.mailgun_domain = form.mailgunDomain.trim() || null;
       input.mailgun_api_url = form.mailgunApiUrl.trim() || null;
-    } else if (form.mailtrapApiToken.length > 0) {
-      input.mailtrap_api_token = form.mailtrapApiToken;
+    }
+    const secretMeta = PROVIDER_SECRET_META[form.provider];
+    const secretValue = form[secretMeta.formKey];
+    if (secretValue.trim().length > 0) {
+      input[secretMeta.errorKey] = secretValue;
     }
     return input;
   }
@@ -183,13 +197,8 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
       if (!form.mailgunDomain.trim()) {
         localErrors.mailgun_domain = "Mailgun domain is required.";
       }
-    } else if (
-      form.provider === "mailtrap" &&
-      !form.mailtrapApiToken.trim() &&
-      !current.mailtrap_api_token_set
-    ) {
-      localErrors.mailtrap_api_token = "Mailtrap API token is required.";
     }
+    Object.assign(localErrors, validateProviderSecrets(form, current));
     if (Object.keys(localErrors).length > 0) {
       setFieldErrors(localErrors);
       setError(Object.values(localErrors)[0]);
@@ -256,6 +265,7 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
     }
   }
 
+  const selectedSecretUnreadable = current.unreadable_secrets.includes(form.provider);
   const testDisabled = testing || saving || dirty || !current.configured;
   const testHint = dirty
     ? "Save changes before sending a test."
@@ -294,6 +304,19 @@ export function NotificationSettingsView({ settings }: NotificationSettingsViewP
           </div>
         </CardHeader>
         <CardContent className="space-y-6">
+          {selectedSecretUnreadable ? (
+            <Alert variant="warning">
+              <div>
+                <AlertTitle>Saved secret cannot be decrypted</AlertTitle>
+                <AlertDescription>
+                  The saved {PROVIDER_SECRET_META[form.provider].label} cannot be decrypted with the
+                  current <code>JWT_SECRET</code>. Re-enter it and save changes to restore email
+                  notifications.
+                </AlertDescription>
+              </div>
+            </Alert>
+          ) : null}
+
           {error ? (
             <Alert variant="destructive">
               <div>
