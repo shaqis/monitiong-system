@@ -23,6 +23,7 @@ export interface NotificationSettings {
   mailgun_api_key_set: boolean;
   mailtrap_api_token_set: boolean;
   provider_credentials_set: boolean;
+  unreadable_secrets: NotificationProvider[];
 }
 
 export interface NotificationSettingsUpdate {

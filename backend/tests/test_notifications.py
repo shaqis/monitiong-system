@@ -1125,3 +1125,291 @@ async def test_database_notifier_stays_silent_when_disabled(
     await notifier.notify(event)
 
     assert transport.messages == []
+
+
+async def test_settings_get_recovers_after_jwt_secret_rotation(
+    client,
+    create_user,
+    login,
+    session_factory,
+    test_settings,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    initial_token = await login(admin.email, "admin-password")
+
+    saved = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {initial_token}"},
+        json={
+            "enabled": True,
+            "provider": "brevo",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "brevo_api_key": "super-secret-brevo-key",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    rotated = test_settings.model_copy(
+        update={"jwt_secret": "rotated-secret-that-is-at-least-32-bytes-long-1234"}
+    )
+    previous_get_settings = app.dependency_overrides.get(get_settings)
+    previous_notifier = app.state.notifier
+    app.dependency_overrides[get_settings] = lambda: rotated
+    app.state.notifier = DatabaseNotifier(session_factory, rotated)
+    try:
+        rotated_token = await login(admin.email, "admin-password")
+        headers = {"Authorization": f"Bearer {rotated_token}"}
+
+        fetched = await client.get("/api/v1/notifications/settings", headers=headers)
+        assert fetched.status_code == 200, fetched.text
+        body = fetched.json()
+        assert body["source"] == "database"
+        assert body["configured"] is False
+        assert body["provider_credentials_set"] is False
+        assert body["brevo_api_key_set"] is False
+        assert body["unreadable_secrets"] == ["brevo"]
+        assert body["from_address"] == "alerts@example.com"
+        assert body["recipients"] == ["ops@example.com"]
+        assert "super-secret-brevo-key" not in fetched.text
+
+        test_response = await client.post("/api/v1/notifications/test", headers=headers)
+        assert test_response.status_code == 503
+
+        updated = await client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={"brevo_api_key": "replacement-brevo-key"},
+        )
+        assert updated.status_code == 200, updated.text
+        updated_body = updated.json()
+        assert updated_body["configured"] is True
+        assert updated_body["brevo_api_key_set"] is True
+        assert updated_body["unreadable_secrets"] == []
+        assert "super-secret-brevo-key" not in updated.text
+        assert "replacement-brevo-key" not in updated.text
+    finally:
+        if previous_get_settings is not None:
+            app.dependency_overrides[get_settings] = previous_get_settings
+        else:
+            app.dependency_overrides.pop(get_settings, None)
+        app.state.notifier = previous_notifier
+
+
+async def test_settings_unreadable_secret_on_other_provider_while_saving_active_provider(
+    client,
+    create_user,
+    login,
+    test_settings,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    initial_token = await login(admin.email, "admin-password")
+
+    saved = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {initial_token}"},
+        json={
+            "enabled": True,
+            "provider": "brevo",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "brevo_api_key": "old-brevo-key",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    rotated = test_settings.model_copy(
+        update={"jwt_secret": "rotated-secret-that-is-at-least-32-bytes-long-1234"}
+    )
+    previous_get_settings = app.dependency_overrides.get(get_settings)
+    app.dependency_overrides[get_settings] = lambda: rotated
+    try:
+        rotated_token = await login(admin.email, "admin-password")
+        headers = {"Authorization": f"Bearer {rotated_token}"}
+
+        switched = await client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={
+                "provider": "mailtrap",
+                "mailtrap_api_token": "new-mailtrap-token",
+            },
+        )
+        assert switched.status_code == 200, switched.text
+        body = switched.json()
+        assert body["configured"] is True
+        assert body["provider"] == "mailtrap"
+        assert body["mailtrap_api_token_set"] is True
+        assert body["brevo_api_key_set"] is False
+        assert body["unreadable_secrets"] == ["brevo"]
+
+        fetched = await client.get("/api/v1/notifications/settings", headers=headers)
+        assert fetched.status_code == 200, fetched.text
+        fetched_body = fetched.json()
+        assert fetched_body["configured"] is True
+        assert fetched_body["unreadable_secrets"] == ["brevo"]
+    finally:
+        if previous_get_settings is not None:
+            app.dependency_overrides[get_settings] = previous_get_settings
+        else:
+            app.dependency_overrides.pop(get_settings, None)
+
+
+async def test_settings_clearing_smtp_username_clears_unreadable_password(
+    client,
+    create_user,
+    login,
+    session_factory,
+    test_settings,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    initial_token = await login(admin.email, "admin-password")
+
+    saved = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {initial_token}"},
+        json={
+            "enabled": True,
+            "provider": "smtp",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "smtp_host": "smtp.example.com",
+            "smtp_username": "smtp-user",
+            "smtp_password": "old-smtp-password",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    rotated = test_settings.model_copy(
+        update={"jwt_secret": "rotated-secret-that-is-at-least-32-bytes-long-1234"}
+    )
+    previous_get_settings = app.dependency_overrides.get(get_settings)
+    app.dependency_overrides[get_settings] = lambda: rotated
+    try:
+        rotated_token = await login(admin.email, "admin-password")
+        headers = {"Authorization": f"Bearer {rotated_token}"}
+
+        fetched = await client.get("/api/v1/notifications/settings", headers=headers)
+        assert fetched.status_code == 200, fetched.text
+        assert fetched.json()["configured"] is False
+        assert fetched.json()["smtp_password_set"] is False
+        assert fetched.json()["unreadable_secrets"] == ["smtp"]
+
+        cleared = await client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={"smtp_username": ""},
+        )
+        assert cleared.status_code == 200, cleared.text
+        cleared_body = cleared.json()
+        assert cleared_body["configured"] is True
+        assert cleared_body["smtp_username"] is None
+        assert cleared_body["smtp_password_set"] is False
+        assert cleared_body["unreadable_secrets"] == []
+
+        async with session_factory() as session:
+            row = await session.get(NotificationSettings, 1)
+        assert row is not None
+        assert row.smtp_password_encrypted is None
+
+        orphan = await client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={"smtp_password": "orphan-password"},
+        )
+        assert orphan.status_code == 422
+    finally:
+        if previous_get_settings is not None:
+            app.dependency_overrides[get_settings] = previous_get_settings
+        else:
+            app.dependency_overrides.pop(get_settings, None)
+
+
+async def test_settings_patch_blank_secret_when_active_unreadable_returns_422_with_field_loc(
+    client,
+    create_user,
+    login,
+    test_settings,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    initial_token = await login(admin.email, "admin-password")
+
+    saved = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {initial_token}"},
+        json={
+            "enabled": True,
+            "provider": "brevo",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "brevo_api_key": "old-brevo-key",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    rotated = test_settings.model_copy(
+        update={"jwt_secret": "rotated-secret-that-is-at-least-32-bytes-long-1234"}
+    )
+    previous_get_settings = app.dependency_overrides.get(get_settings)
+    app.dependency_overrides[get_settings] = lambda: rotated
+    try:
+        rotated_token = await login(admin.email, "admin-password")
+        headers = {"Authorization": f"Bearer {rotated_token}"}
+
+        blank = await client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={"brevo_api_key": "   "},
+        )
+        assert blank.status_code == 422
+        assert blank.json()["detail"][0]["loc"] == ["body", "brevo_api_key"]
+
+        omitted = await client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={"enabled": False},
+        )
+        assert omitted.status_code == 422
+        assert omitted.json()["detail"][0]["loc"] == ["body", "brevo_api_key"]
+    finally:
+        if previous_get_settings is not None:
+            app.dependency_overrides[get_settings] = previous_get_settings
+        else:
+            app.dependency_overrides.pop(get_settings, None)
+
+
+async def test_settings_get_env_fallback_provider_credentials_set_without_sender(
+    client,
+    create_user,
+    login,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    token = await login(admin.email, "admin-password")
+    partial_env = Settings(
+        database_url="postgresql+asyncpg://user:pass@localhost:5432/uptime",
+        first_admin_email="admin@example.com",
+        first_admin_password="test-admin-password",
+        first_admin_name="Admin",
+        jwt_secret="test-secret-that-is-long-enough-for-hs512-signing-and-at-least-32-bytes",
+        smtp_host="smtp.example.com",
+        email_from_address=None,
+        notification_recipients=[],
+    )
+    previous_get_settings = app.dependency_overrides.get(get_settings)
+    app.dependency_overrides[get_settings] = lambda: partial_env
+    try:
+        response = await client.get(
+            "/api/v1/notifications/settings",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["source"] == "environment"
+        assert body["configured"] is False
+        assert body["provider_credentials_set"] is True
+        assert body["unreadable_secrets"] == []
+    finally:
+        if previous_get_settings is not None:
+            app.dependency_overrides[get_settings] = previous_get_settings
+        else:
+            app.dependency_overrides.pop(get_settings, None)

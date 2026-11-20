@@ -14,7 +14,10 @@ from app.notifications.service import (
     NotificationService,
 )
 from app.notifications.settings_store import (
+    NotificationSettingsSnapshot,
+    SecretStatus,
     load_notification_config,
+    load_notification_settings_snapshot,
     save_notification_config,
 )
 from app.notifications.transports import (
@@ -39,11 +42,14 @@ __all__ = [
     "NotificationConfig",
     "NotificationConfigError",
     "NotificationService",
+    "NotificationSettingsSnapshot",
     "OutboundEmail",
     "ProviderConfig",
+    "SecretStatus",
     "SmtpConfig",
     "build_transport",
     "config_from_env",
     "load_notification_config",
+    "load_notification_settings_snapshot",
     "save_notification_config",
 ]

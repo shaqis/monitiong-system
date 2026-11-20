@@ -16,7 +16,11 @@ from app.notifications.config import (
 
 
 class NotificationConfigError(ValueError):
-    """The selected transport is missing required configuration."""
+    """The selected transport is missing or cannot decrypt required configuration."""
+
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        self.field = field
+        super().__init__(message)
 
 
 class EmailTransportError(Exception):
