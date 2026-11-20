@@ -1,10 +1,18 @@
-# System & Module Statecharts
+# System and module statecharts
 
-This document summarizes the four TLA+ / TLC statecharts and verified findings for the systems and modules in this repository.
+This document records the four TLA+ and TLC statechart verifications against `main` (`1572bf2`).
+
+To regenerate any chart from its spec, view, and config in the scratch folder, run `statechart` with a fresh `--out` directory:
+
+```sh
+TLA2TOOLS=.../tools/tla2tools.jar JAVA=/opt/homebrew/opt/openjdk@17/bin/java \
+  ~/.gemini/config/plugins/pstack/skills/statechart/scripts/statechart \
+  <SPEC.tla> --config <SPEC.cfg> --view <VIEW.ts> --out <OUT_DIR>
+```
 
 ---
 
-## 1. Monitor Health, 2-Strike Rule & Incident Lifecycle
+## 1. Monitor health, 2-strike rule, and incident lifecycle
 
 **Source modules:**
 - [`backend/app/worker/state.py`](../backend/app/worker/state.py)
@@ -25,89 +33,55 @@ stateDiagram-v2
     lg2: warning
     lg3: incident
     lg4: paused
-    lg5: Breaks ActiveDownHasOpenIncident or ActiveDownRequiresTwoFailures or DegradedRequiresOneFailure
-    lg6: Path to the ActiveDownHasOpenIncident or ActiveDownRequiresTwoFailures or DegradedRequiresOneFailure bug
   }
   class lg0 tan
   class lg1 teal
   class lg2 yellow
   class lg3 orange
   class lg4 purple
-  class lg5 breaks
-  class lg6 bugPath
   s0: Not Created
   state "Active" as s1 {
     s2: Pending Check
     s3: Healthy (UP)
     s4: 1st Strike (DEGRADED)
     s5: Incident Open (DOWN)
-    s6: Resumed as DEGRADED (0 strikes)
-    s7: Resumed as DOWN (no incident)
   }
-  state "Paused" as s8 {
-    s9: Paused (Pending)
-    s10: Paused (was DEGRADED)
-    s11: Paused (was UP)
-    s12: Paused (was DOWN)
-  }
+  s6: Paused (Pending)
   [*] --> s0
   s0 --> s2: admin creates monitor
-  s2 --> s9: admin pauses
+  s2 --> s6: admin pauses (resets to pending)
   s2 --> s3: probe succeeds
   s2 --> s4: 1st failure (5s retry scheduled)
-  s9 --> s2: admin resumes (due now)
+  s6 --> s0: admin deletes monitor
+  s6 --> s2: admin resumes (resets to pending, due now)
+  s3 --> s2: admin edits target (resets to pending)
+  s3 --> s6: admin pauses (resets to pending)
   s3 --> s4: 1st failure (5s retry scheduled)
-  s3 --> s11: admin pauses
+  s4 --> s2: admin edits target (resets to pending)
+  s4 --> s6: admin pauses (resets to pending)
   s4 --> s3: probe succeeds
-  s4 --> s10: admin pauses
   s4 --> s5: 2nd failure (opens incident, sends DOWN email)
-  s10 --> s6: admin resumes (due now)
-  s11 --> s3: admin resumes (due now)
+  s5 --> s2: admin edits target (resets to pending, resolves incident)
+  s5 --> s6: admin pauses (resets to pending, resolves incident)
   s5 --> s3: probe succeeds (resolves incident, sends UP email)
-  s5 --> s12: admin pauses (resolves incident silently)
-  s12 --> s7: admin resumes (due now)
-  s6 --> s3: probe succeeds
-  s6 --> s4: 1st failure (5s retry scheduled)
-  s7 --> s3: probe succeeds
-  s7 --> s4: 1st failure (5s retry scheduled)
   s1 --> s0: admin deletes monitor
-  s8 --> s0: admin deletes monitor
-  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
-  class s0 bugPath
   class s2 teal
-  class s2 bugPath
   class s3 teal
   class s4 yellow
-  class s4 bugPath
   class s5 orange
-  class s5 bugPath
-  class s6 yellow
-  class s6 breaks
-  class s6 bugPath
-  class s7 orange
-  class s7 breaks
-  class s7 bugPath
-  class s9 purple
-  class s10 purple
-  class s10 bugPath
-  class s11 purple
-  class s12 purple
-  class s12 bugPath
+  class s6 purple
 ```
 
-### Verification Summary
-- **Model size:** 11 states, 43 steps (chart draws 11 states and 21 arrows).
-- **Rules that hold:** `TypeOK`, `OpenIncidentOnlyWhenActiveDown`, `PendingHasNoIncident`, `NoDeadlock`.
-- **Broken rules (replayed and confirmed against backend code):**
-  - `DegradedRequiresOneFailure` (at `Resumed as DEGRADED (0 strikes)`): `0. Not Created` -> `1. admin creates monitor` -> `2. 1st failure (5s retry scheduled)` -> `3. admin pauses` -> `4. admin resumes (due now)`. Pausing resets `consecutive_failures = 0` without resetting `current_status`, so resuming leaves an active monitor in `DEGRADED` with `0` failures.
-  - `ActiveDownHasOpenIncident` & `ActiveDownRequiresTwoFailures` (at `Resumed as DOWN (no incident)`): `0. Not Created` -> `1. admin creates monitor` -> `2. 1st failure (5s retry scheduled)` -> `3. 2nd failure (opens incident, sends DOWN email)` -> `4. admin pauses (resolves incident silently)` -> `5. admin resumes (due now)`. Pausing resolves the open incident and resets `consecutive_failures = 0` without resetting `current_status`, so resuming leaves an active monitor counted as `DOWN` in `/dashboard/summary` and `/monitors?status=down` with `0` failures and no open incident.
-- **Hidden in chart:** `EditTarget` resets (which reset any existing monitor to `Pending Check` / `Paused (Pending)` and resolve open incidents) and `PauseMonitor` from `Resumed as DEGRADED` / `Resumed as DOWN`.
-- **Model scope:** Models a single monitor lifecycle; leaves out multi-monitor concurrency, time-series `monitor_checks` logging, `ssl_days_remaining` caching, and `HEAD`+keyword warning validation.
+### Verification summary
+- **Model size.** TLC reached 6 states and 24 steps. The chart draws 6 states and 17 arrows, and skips 4 steps that stay in one chart state.
+- **Rules that hold.** `TypeOK`, `OpenIncidentOnlyWhenActiveDown`, `ActiveDownHasOpenIncident`, `ActiveDownRequiresTwoFailures`, `DegradedRequiresOneFailure`, `PendingHasNoIncident`, `PausedResetsToPending`, and `NoDeadlock`.
+- **Lifecycle behavior.** Pausing, resuming, or editing target fields runs `plan_lifecycle_transition` and `_apply_lifecycle_transition` in `backend/app/api/v1/monitors.py`, which set `current_status` to `PENDING`, reset `consecutive_failures` to `0`, and resolve open incidents.
+- **Model scope.** Models a single monitor lifecycle. Leaves out multi-monitor concurrency, time-series `monitor_checks` logging, `ssl_days_remaining` caching, and `HEAD` keyword warnings.
 
 ---
 
-## 2. Scheduler & CheckRunner Concurrency
+## 2. Scheduler and CheckRunner concurrency
 
 **Source modules:**
 - [`backend/app/worker/scheduler.py`](../backend/app/worker/scheduler.py)
@@ -162,15 +136,15 @@ stateDiagram-v2
   class s5 purple
 ```
 
-### Verification Summary
-- **Model size:** 24 states, 82 steps (chart draws 6 states and 15 arrows).
-- **All rules hold:** `TypeOK`, `IdleHasNoInflight`, `NoStaleWrite`, `NotifyOnlyAfterCommit`, `NoDeadlock`.
-- **Hidden in chart:** `RejectWhenUnavailable`, `RejectConcurrentRun` (`CheckAlreadyRunning` 409), and `AdminEditsTarget` outside `probing`.
-- **Model scope:** Models single-process `CheckRunner` admission, `TargetSnapshot` validation, and `WITH FOR UPDATE` commit guards; leaves out `asyncio.Semaphore(20)` queuing across multiple monitors, dedicated SSL thread-pool timeouts, `prober.py` 1 MiB body streaming cap, and multi-process replica races.
+### Verification summary
+- **Model size.** TLC reached 24 states and 82 steps. The chart draws 6 states and 15 arrows, skips 16 self-loop steps, and hides 26 steps in the view.
+- **Rules that hold.** `TypeOK`, `IdleHasNoInflight`, `NoStaleWrite`, `NotifyOnlyAfterCommit`, and `NoDeadlock`.
+- **Hidden in chart.** `RejectWhenUnavailable`, `RejectConcurrentRun` (`CheckAlreadyRunning`, HTTP `409`), and `AdminEditsTarget` outside `probing`.
+- **Model scope.** Models single-process `CheckRunner` admission, `TargetSnapshot` validation, and `WITH FOR UPDATE` commit guards. Leaves out `asyncio.Semaphore(20)` queuing across monitors, dedicated SSL thread-pool timeouts, the 1 MiB response body cap in `prober.py`, and multi-process replica races.
 
 ---
 
-## 3. Auth, Token Versioning & RBAC Guardrails
+## 3. Auth, token versioning, and RBAC guardrails
 
 **Source modules:**
 - [`backend/app/db/seed.py`](../backend/app/db/seed.py)
@@ -246,15 +220,15 @@ stateDiagram-v2
   class s10 purple
 ```
 
-### Verification Summary
-- **Model size:** 47 states, 240 steps (chart draws 9 states and 20 arrows).
-- **All rules hold:** `TypeOK`, `AlwaysOneActiveAdmin`, `InactiveUserNeverAuthenticates`, `StaleTokensNeverAuthenticate`, `NoDeadlock`.
-- **Hidden in chart:** Bootstrap admin role changes (`AdminDemoteOrDeactivateA` / `AdminRestoreA`), re-login while a valid cookie already exists, deactivating an already logged-out user, and reactivating directly into a pre-existing active token state.
-- **Model scope:** Models two users (`admin` seed + second user), cookie vs. bearer logout semantics, `token_version` invalidation, the `users_admin_guard` last-admin check, and SSR route guards; leaves out JWT expiration, legacy tokens without `ver`, bcrypt validation, and `COOKIE_SECURE` startup checks.
+### Verification summary
+- **Model size.** TLC reached 47 states and 240 steps. The chart draws 9 states and 20 arrows, skips 124 self-loop steps, and hides 47 steps in the view.
+- **Rules that hold.** `TypeOK`, `AlwaysOneActiveAdmin`, `InactiveUserNeverAuthenticates`, `StaleTokensNeverAuthenticate`, and `NoDeadlock`.
+- **Hidden in chart.** Bootstrap admin role changes (`AdminDemoteOrDeactivateA` and `AdminRestoreA`), re-login while a valid cookie already exists, deactivating a logged-out user, and reactivating directly into a pre-existing valid token state.
+- **Model scope.** Models two users (the seeded admin and a second user), cookie and bearer logout behavior, `token_version` invalidation, the `users_admin_guard` last-admin check, and SSR route guards. Leaves out JWT expiration, legacy tokens without `ver`, bcrypt validation, and `COOKIE_SECURE` startup checks.
 
 ---
 
-## 4. Notification Settings, Encrypted Secrets & Email Delivery
+## 4. Notification settings, encrypted secrets, and email delivery
 
 **Source modules:**
 - [`backend/app/notifications/config.py`](../backend/app/notifications/config.py)
@@ -264,7 +238,8 @@ stateDiagram-v2
 - [`backend/app/notifications/transports.py`](../backend/app/notifications/transports.py)
 - [`backend/app/api/v1/notifications.py`](../backend/app/api/v1/notifications.py)
 - [`frontend/src/app/(app)/settings/page.tsx`](../frontend/src/app/(app)/settings/page.tsx)
-- [`frontend/src/app/(app)/error.tsx`](../frontend/src/app/(app)/error.tsx)
+- [`frontend/src/components/settings/notification-settings-view.tsx`](../frontend/src/components/settings/notification-settings-view.tsx)
+- [`frontend/src/components/settings/notification-provider-fields.tsx`](../frontend/src/components/settings/notification-provider-fields.tsx)
 
 ```mermaid
 ---
@@ -275,16 +250,12 @@ stateDiagram-v2
     lg0: unconfigured
     lg1: readyDisabled
     lg2: readyEnabled
-    lg3: broken
-    lg4: Breaks SettingsPageLoadsAfterJwtRotation
-    lg5: Path to the SettingsPageLoadsAfterJwtRotation bug
+    lg3: recovery
   }
   class lg0 tan
   class lg1 blue
   class lg2 teal
-  class lg3 orange
-  class lg4 breaks
-  class lg5 bugPath
+  class lg3 yellow
   state "Unconfigured (Env Fallback)" as s0 {
     s1: Settings Page Closed
     s2: Settings Page Open
@@ -299,8 +270,8 @@ stateDiagram-v2
     s9: Provider Error Logged (Check Kept)
   }
   state "JWT Rotated (Undecryptable)" as s10 {
-    s11: Secret Undecryptable (Re-login Needed)
-    s12: Settings Page Crashes (503)
+    s11: Secret Unreadable (Form Closed)
+    s12: Recovery Form Open (Warning Banner)
   }
   [*] --> s1
   s1 --> s2: admin opens /settings
@@ -310,38 +281,32 @@ stateDiagram-v2
   s4 --> s5: admin sends test email (204)
   s7 --> s8: incident opens or resolves (email sent)
   s7 --> s9: incident email fails (logged, check kept)
-  s11 --> s12: admin opens /settings (503 load failure)
+  s11 --> s12: admin opens /settings (200 warning, re-enter secret)
   s8 --> s9: incident email fails (logged, check kept)
   s8 --> s7: admin sends test email (204)
   s9 --> s8: incident opens or resolves (email sent)
   s9 --> s7: admin sends test email (204)
-  s12 --> s11: closes error page
+  s12 --> s4: admin re-enters secret and saves (alerts off)
+  s12 --> s7: admin re-enters secret and saves (alerts on)
+  s12 --> s11: admin leaves /settings
   s3 --> s7: admin saves credentials (alerts on) or admin enables alerts (keeps secret)
   s3 --> s11: JWT_SECRET rotates
   s6 --> s4: admin saves credentials (alerts off) or admin disables alerts (keeps secret)
   s6 --> s11: JWT_SECRET rotates
-  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s1 tan
-  class s1 bugPath
   class s2 tan
-  class s2 bugPath
   class s4 blue
-  class s4 bugPath
   class s5 blue
   class s7 teal
   class s8 teal
   class s9 teal
-  class s11 orange
-  class s11 bugPath
-  class s12 orange
-  class s12 breaks
-  class s12 bugPath
+  class s11 yellow
+  class s12 yellow
 ```
 
-### Verification Summary
-- **Model size:** 34 states, 189 steps (chart draws 9 states and 17 arrows).
-- **Rules that hold:** `TypeOK`, `NoAlertSentWhenDisabled`, `NoSendWhenUnconfiguredOrUndecryptable`, `NoDeadlock`.
-- **Broken rule (replayed and confirmed against backend code):**
-  - `SettingsPageLoadsAfterJwtRotation` (at `Settings Page Crashes (503)`): `0. Unconfigured (Env Fallback) / Settings Page Closed` -> `1. admin opens /settings` -> `2. admin saves credentials (alerts off)` -> `3. JWT_SECRET rotates` -> `4. admin opens /settings (503 load failure)`. `GET /api/v1/notifications/settings` attempts to decrypt the active provider's stored secret and raises `HTTP 503`, causing the Next.js `/settings` Server Component to render `error.tsx` instead of the settings form where the admin could re-enter the secret.
-- **Hidden in chart:** `SendTestEmail` when returning `502`/`503` without changing state, `WorkerIncidentAlert` when skipped, and no-op saves that keep the same `enabled` value.
-- **Model scope:** Leaves out per-provider field validation (`smtp`, `brevo`, `mailgun`, `mailtrap`), switching providers while an unused provider's secret is undecryptable, and direct `PATCH /api/v1/notifications/settings` API calls outside the UI.
+### Verification summary
+- **Model size.** TLC reached 34 states and 184 steps. The chart draws 9 states and 19 arrows, skips 26 self-loop steps, and hides 68 steps in the view.
+- **Rules that hold.** `TypeOK`, `NoAlertSentWhenDisabled`, `NoSendWhenUnconfiguredOrUndecryptable`, `SettingsPageLoadsAfterJwtRotation`, `UndecryptableIsNeverConfigured`, and `NoDeadlock`.
+- **Recovery behavior.** When `JWT_SECRET` rotates, `GET /api/v1/notifications/settings` calls `load_notification_settings_snapshot` to return non-secret fields with `configured` set to `false` and `unreadable_secrets` populated. The `/settings` page renders a warning banner so an admin can re-enter the secret and save, while `POST /api/v1/notifications/test` (`HTTP 503`) and `DatabaseNotifier` refuse delivery until recovery finishes.
+- **Hidden in chart.** `SendTestEmail` when returning `HTTP 502` or `503` without changing state, `WorkerIncidentAlert` when skipped, and no-op saves that keep `enabled` unchanged.
+- **Model scope.** Leaves out per-provider field validation (`smtp`, `brevo`, `mailgun`, `mailtrap`), switching providers while another provider's secret is unreadable, and direct `PATCH /api/v1/notifications/settings` requests that omit a replacement secret (`HTTP 422`).
