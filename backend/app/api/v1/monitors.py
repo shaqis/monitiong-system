@@ -34,6 +34,7 @@ from app.worker.checker import (
     MonitorNotFound,
     MonitorPaused,
 )
+from app.worker.state import LifecycleTransition, plan_lifecycle_transition
 
 router = APIRouter()
 
@@ -70,16 +71,19 @@ async def _resolve_open_incidents(
     )
 
 
-async def _reset_target_state(
+async def _apply_lifecycle_transition(
     db: AsyncSession,
     monitor: Monitor,
-    resolved_at: datetime,
+    transition: LifecycleTransition,
+    now: datetime,
 ) -> None:
-    """Restart the check cycle after the probed target changed."""
-    monitor.current_status = "PENDING"
-    monitor.consecutive_failures = 0
-    monitor.last_checked_at = None
-    await _resolve_open_incidents(db, monitor.id, resolved_at)
+    """Apply a planned LifecycleTransition to the locked Monitor row and its open incidents."""
+    monitor.current_status = transition.current_status
+    monitor.consecutive_failures = transition.consecutive_failures
+    if transition.clear_last_checked_at:
+        monitor.last_checked_at = None
+    if transition.resolve_open_incidents:
+        await _resolve_open_incidents(db, monitor.id, now)
 
 
 def _percent(up: int, total: int) -> float | None:
@@ -292,17 +296,13 @@ async def update_monitor(
     for field in MonitorCreate.model_fields:
         setattr(monitor, field, getattr(validated, field))
 
-    if target_changed:
-        await _reset_target_state(db, monitor, datetime.now(UTC))
-
-    if payload.is_active is False:
-        # The next cycle starts from zero, so a resume needs two strikes.
-        monitor.consecutive_failures = 0
-        await _resolve_open_incidents(db, monitor.id, datetime.now(UTC))
-    elif payload.is_active is True and not was_active:
-        # The paused row keeps its old check time, which would delay the next
-        # probe by a full interval. Make the resumed monitor due now.
-        monitor.last_checked_at = None
+    transition = plan_lifecycle_transition(
+        was_active=was_active,
+        is_active=monitor.is_active,
+        target_changed=target_changed,
+    )
+    if transition is not None:
+        await _apply_lifecycle_transition(db, monitor, transition, datetime.now(UTC))
 
     await db.commit()
     await db.refresh(monitor)

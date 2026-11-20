@@ -1,6 +1,12 @@
 import pytest
 
-from app.worker.state import MonitorState, apply_probe_result
+from app.worker.state import (
+    STATUS_PENDING,
+    LifecycleTransition,
+    MonitorState,
+    apply_probe_result,
+    plan_lifecycle_transition,
+)
 
 
 @pytest.mark.parametrize(
@@ -70,3 +76,85 @@ def test_second_failure_still_opens_incident_without_open_row() -> None:
     )
 
     assert transition.open_incident is True
+
+
+@pytest.mark.parametrize(
+    ("was_active", "is_active"),
+    [
+        (True, True),
+        (True, False),
+        (False, True),
+        (False, False),
+    ],
+)
+def test_plan_lifecycle_transition_target_change_resets_and_clears_last_checked(
+    was_active: bool,
+    is_active: bool,
+) -> None:
+    transition = plan_lifecycle_transition(
+        was_active=was_active,
+        is_active=is_active,
+        target_changed=True,
+    )
+
+    assert transition == LifecycleTransition(
+        current_status=STATUS_PENDING,
+        consecutive_failures=0,
+        clear_last_checked_at=True,
+        resolve_open_incidents=True,
+    )
+
+
+def test_plan_lifecycle_transition_pause_resets_status_and_preserves_last_checked() -> None:
+    transition = plan_lifecycle_transition(
+        was_active=True,
+        is_active=False,
+        target_changed=False,
+    )
+
+    assert transition == LifecycleTransition(
+        current_status=STATUS_PENDING,
+        consecutive_failures=0,
+        clear_last_checked_at=False,
+        resolve_open_incidents=True,
+    )
+
+
+def test_plan_lifecycle_transition_paused_metadata_edit_converges_cleanly() -> None:
+    transition = plan_lifecycle_transition(
+        was_active=False,
+        is_active=False,
+        target_changed=False,
+    )
+
+    assert transition == LifecycleTransition(
+        current_status=STATUS_PENDING,
+        consecutive_failures=0,
+        clear_last_checked_at=False,
+        resolve_open_incidents=True,
+    )
+
+
+def test_plan_lifecycle_transition_resume_resets_status_and_clears_last_checked() -> None:
+    transition = plan_lifecycle_transition(
+        was_active=False,
+        is_active=True,
+        target_changed=False,
+    )
+
+    assert transition == LifecycleTransition(
+        current_status=STATUS_PENDING,
+        consecutive_failures=0,
+        clear_last_checked_at=True,
+        resolve_open_incidents=True,
+    )
+
+
+def test_plan_lifecycle_transition_active_metadata_edit_returns_none() -> None:
+    transition = plan_lifecycle_transition(
+        was_active=True,
+        is_active=True,
+        target_changed=False,
+    )
+
+    assert transition is None

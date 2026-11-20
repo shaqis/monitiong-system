@@ -51,3 +51,44 @@ def apply_probe_result(state: MonitorState, ok: bool) -> Transition:
         open_incident=not state.has_open_incident,
         resolve_incident=False,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleTransition:
+    current_status: str
+    consecutive_failures: int
+    clear_last_checked_at: bool
+    resolve_open_incidents: bool
+
+
+def plan_lifecycle_transition(
+    *,
+    was_active: bool,
+    is_active: bool,
+    target_changed: bool,
+) -> LifecycleTransition | None:
+    """Return the cycle reset required by target edit, pause, or resume."""
+    if target_changed:
+        return LifecycleTransition(
+            current_status=STATUS_PENDING,
+            consecutive_failures=0,
+            clear_last_checked_at=True,
+            resolve_open_incidents=True,
+        )
+    if not is_active:
+        # Preserve last_checked_at on pause for historical display while clearing stale status.
+        return LifecycleTransition(
+            current_status=STATUS_PENDING,
+            consecutive_failures=0,
+            clear_last_checked_at=False,
+            resolve_open_incidents=True,
+        )
+    if not was_active and is_active:
+        # Clear last_checked_at on resume so the scheduler probes immediately.
+        return LifecycleTransition(
+            current_status=STATUS_PENDING,
+            consecutive_failures=0,
+            clear_last_checked_at=True,
+            resolve_open_incidents=True,
+        )
+    return None
