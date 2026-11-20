@@ -1125,3 +1125,72 @@ async def test_database_notifier_stays_silent_when_disabled(
     await notifier.notify(event)
 
     assert transport.messages == []
+
+
+async def test_settings_get_recovers_after_jwt_secret_rotation(
+    client,
+    create_user,
+    login,
+    session_factory,
+    test_settings,
+) -> None:
+    admin = await create_user(email="admin@example.com", password="admin-password", role="admin")
+    initial_token = await login(admin.email, "admin-password")
+
+    saved = await client.patch(
+        "/api/v1/notifications/settings",
+        headers={"Authorization": f"Bearer {initial_token}"},
+        json={
+            "enabled": True,
+            "provider": "brevo",
+            "from_address": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "brevo_api_key": "super-secret-brevo-key",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    rotated = test_settings.model_copy(
+        update={"jwt_secret": "rotated-secret-that-is-at-least-32-bytes-long-1234"}
+    )
+    previous_get_settings = app.dependency_overrides.get(get_settings)
+    previous_notifier = app.state.notifier
+    app.dependency_overrides[get_settings] = lambda: rotated
+    app.state.notifier = DatabaseNotifier(session_factory, rotated)
+    try:
+        rotated_token = await login(admin.email, "admin-password")
+        headers = {"Authorization": f"Bearer {rotated_token}"}
+
+        fetched = await client.get("/api/v1/notifications/settings", headers=headers)
+        assert fetched.status_code == 200, fetched.text
+        body = fetched.json()
+        assert body["source"] == "database"
+        assert body["configured"] is False
+        assert body["provider_credentials_set"] is False
+        assert body["brevo_api_key_set"] is False
+        assert body["unreadable_secrets"] == ["brevo"]
+        assert body["from_address"] == "alerts@example.com"
+        assert body["recipients"] == ["ops@example.com"]
+        assert "super-secret-brevo-key" not in fetched.text
+
+        test_response = await client.post("/api/v1/notifications/test", headers=headers)
+        assert test_response.status_code == 503
+
+        updated = await client.patch(
+            "/api/v1/notifications/settings",
+            headers=headers,
+            json={"brevo_api_key": "replacement-brevo-key"},
+        )
+        assert updated.status_code == 200, updated.text
+        updated_body = updated.json()
+        assert updated_body["configured"] is True
+        assert updated_body["brevo_api_key_set"] is True
+        assert updated_body["unreadable_secrets"] == []
+        assert "super-secret-brevo-key" not in updated.text
+        assert "replacement-brevo-key" not in updated.text
+    finally:
+        if previous_get_settings is not None:
+            app.dependency_overrides[get_settings] = previous_get_settings
+        else:
+            app.dependency_overrides.pop(get_settings, None)
+        app.state.notifier = previous_notifier

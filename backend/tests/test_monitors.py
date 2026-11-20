@@ -1163,3 +1163,124 @@ async def test_create_preserves_url_path_query_fragment_and_userinfo(
     )
 
     assert created["url"] == "https://user:pass@example.com:8443/a/b?x=1&y=2#frag"
+
+
+async def test_pausing_and_resuming_down_monitor_resets_status_to_pending_and_clears_down_counts(
+    client,
+    admin,
+    session_factory,
+    login,
+) -> None:
+    token = await login(admin.email, "admin-password")
+    created = await _create(client, token)
+    monitor_id = UUID(created["id"])
+    app.state.check_runner = CheckRunner(session_factory, _failing_prober)
+
+    first = await client.post(f"/api/v1/monitors/{monitor_id}/check-now", headers=_auth(token))
+    second = await client.post(f"/api/v1/monitors/{monitor_id}/check-now", headers=_auth(token))
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    down_detail = await client.get(f"/api/v1/monitors/{monitor_id}", headers=_auth(token))
+    assert down_detail.json()["current_status"] == "DOWN"
+    assert down_detail.json()["consecutive_failures"] == 2
+    async with session_factory() as incident_session:
+        open_before_pause = await incident_session.scalar(
+            select(func.count())
+            .select_from(Incident)
+            .where(Incident.monitor_id == monitor_id, Incident.resolved_at.is_(None))
+        )
+    assert open_before_pause == 1
+
+    paused = await client.patch(
+        f"/api/v1/monitors/{monitor_id}",
+        json={"is_active": False},
+        headers=_auth(token),
+    )
+    assert paused.status_code == 200
+    assert paused.json()["current_status"] == "PENDING"
+    assert paused.json()["consecutive_failures"] == 0
+    async with session_factory() as incident_session:
+        open_after_pause = await incident_session.scalar(
+            select(func.count())
+            .select_from(Incident)
+            .where(Incident.monitor_id == monitor_id, Incident.resolved_at.is_(None))
+        )
+    assert open_after_pause == 0
+
+    resumed = await client.patch(
+        f"/api/v1/monitors/{monitor_id}",
+        json={"is_active": True},
+        headers=_auth(token),
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["current_status"] == "PENDING"
+    assert resumed.json()["consecutive_failures"] == 0
+    assert resumed.json()["last_checked_at"] is None
+
+    down_list = await client.get("/api/v1/monitors?status=down", headers=_auth(token))
+    assert down_list.status_code == 200
+    assert down_list.json() == []
+
+    summary = await client.get("/api/v1/dashboard/summary", headers=_auth(token))
+    assert summary.status_code == 200
+    assert summary.json()["down_count"] == 0
+    assert summary.json()["pending_count"] == 1
+
+
+async def test_pausing_and_resuming_degraded_monitor_resets_status_to_pending(
+    client,
+    admin,
+    session_factory,
+    login,
+) -> None:
+    token = await login(admin.email, "admin-password")
+    created = await _create(client, token)
+    monitor_id = UUID(created["id"])
+    app.state.check_runner = CheckRunner(session_factory, _failing_prober)
+
+    check = await client.post(f"/api/v1/monitors/{monitor_id}/check-now", headers=_auth(token))
+    assert check.status_code == 201
+    degraded = await client.get(f"/api/v1/monitors/{monitor_id}", headers=_auth(token))
+    assert degraded.json()["current_status"] == "DEGRADED"
+
+    paused = await client.patch(
+        f"/api/v1/monitors/{monitor_id}",
+        json={"is_active": False},
+        headers=_auth(token),
+    )
+    assert paused.status_code == 200
+
+    resumed = await client.patch(
+        f"/api/v1/monitors/{monitor_id}",
+        json={"is_active": True},
+        headers=_auth(token),
+    )
+    assert resumed.status_code == 200
+    assert resumed.json()["current_status"] == "PENDING"
+    assert resumed.json()["consecutive_failures"] == 0
+
+
+async def test_resuming_pre_existing_paused_down_monitor_resets_status_to_pending(
+    client,
+    admin,
+    create_monitor,
+    login,
+) -> None:
+    monitor = await create_monitor(
+        is_active=False,
+        current_status="DOWN",
+        consecutive_failures=0,
+        last_checked_at=datetime.now(UTC),
+    )
+    token = await login(admin.email, "admin-password")
+
+    resumed = await client.patch(
+        f"/api/v1/monitors/{monitor.id}",
+        json={"is_active": True},
+        headers=_auth(token),
+    )
+
+    assert resumed.status_code == 200
+    assert resumed.json()["current_status"] == "PENDING"
+    assert resumed.json()["last_checked_at"] is None
