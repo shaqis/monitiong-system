@@ -22,9 +22,13 @@ docker compose up -d --build
 
 Open the dashboard at http://localhost:3000 and sign in with `FIRST_ADMIN_EMAIL` and `FIRST_ADMIN_PASSWORD`. Swagger UI is at http://localhost:8000/docs. The OpenAPI document is at http://localhost:8000/openapi.json. PostgreSQL listens on localhost:5432. If a port is taken, change `FRONTEND_PORT`, `BACKEND_PORT`, or `POSTGRES_PORT` in `.env`.
 
-If you change `FRONTEND_PORT`, set `CORS_ORIGINS` to exactly match the new browser origin, for example `CORS_ORIGINS=["http://localhost:3001"]`. The Next.js server reaches the API through the Compose network with `API_INTERNAL_URL`; the browser uses `NEXT_PUBLIC_API_URL`. The frontend and API must share the cookie host, because the server forwards the auth cookie.
+If you change `FRONTEND_PORT`, set `CORS_ORIGINS` to exactly match the new browser origin, for example `CORS_ORIGINS=["http://localhost:3001"]`. If you change `BACKEND_PORT`, update `NEXT_PUBLIC_API_URL` to match. The Next.js server reaches the API through the Compose network with `API_INTERNAL_URL`, and the browser uses `NEXT_PUBLIC_API_URL`. The frontend and API must share the cookie host, because the server forwards the auth cookie.
 
 If you change `POSTGRES_USER`, `POSTGRES_PASSWORD`, or `POSTGRES_DB` after the first start, run `docker compose down -v` before starting again. The database volume keeps the old credentials.
+
+## Production deployment
+
+For a single-server Docker deployment behind Caddy with HTTPS, see [`docs/deployment.md`](docs/deployment.md).
 
 ## One backend process
 
@@ -32,14 +36,14 @@ Run exactly one `backend` service. The scheduler and the per-monitor check locks
 
 ## Roles
 
-- `admin`: manages users and creates, edits, pauses, deletes, and checks URLs.
-- `viewer`: reads the dashboard, URL directory, URL details, and incidents. The UI hides mutation controls and redirects `/users` to `/dashboard`; the API also returns `403` for admin-only calls.
+- `admin`: manages users, configures email notifications, and creates, edits, pauses, deletes, and checks URLs.
+- `viewer`: reads the dashboard, URL directory, URL details, and incidents. The UI hides mutation controls along with the **Users** and **Settings** sidebar links, and redirects `/users` and `/settings` to `/dashboard`. The API also returns `403` for admin-only calls.
 
 ## Email notifications
 
-Incident open and recovery can send email through SMTP, Brevo, Mailgun, or Mailtrap. Admins edit any of the four on the **Settings** page: SMTP host and credentials, a Brevo API key, a Mailgun API key with sending domain and optional API URL, or a Mailtrap sending API token. The worker reads the effective configuration on every send, so a save applies immediately without a restart. When nothing is saved, the backend environment is the fallback: set `EMAIL_NOTIFICATIONS_ENABLED=true`, choose `EMAIL_PROVIDER`, fill that provider's block, and list `NOTIFICATION_RECIPIENTS` as a JSON list. Saved secrets are encrypted at rest with a key derived from `JWT_SECRET`, so rotating `JWT_SECRET` requires re-entering them. Empty optional values count as unset. The first failed check stays silent; an email goes out only when the second consecutive failure opens an incident, and again when a successful check resolves it.
+Incident open and recovery can send email through SMTP, Brevo, Mailgun, or Mailtrap. Admins edit any of the four on the **Settings** page: SMTP host and credentials, a Brevo API key, a Mailgun API key with sending domain and optional API URL, or a Mailtrap sending API token. The worker reads the effective configuration on every send, so a save applies immediately without a restart. When nothing is saved, the backend environment is the fallback: set `EMAIL_NOTIFICATIONS_ENABLED=true`, choose `EMAIL_PROVIDER`, fill that provider's block, and list `NOTIFICATION_RECIPIENTS` as a JSON list. Saved secrets are encrypted at rest with a key derived from `JWT_SECRET`, so rotating `JWT_SECRET` requires re-entering them. Empty optional values count as unset. The first failed check stays silent. An email goes out only when the second consecutive failure opens an incident, and again when a successful check resolves it.
 
-Admins can open **Settings** in the sidebar to edit that configuration and send a test email. The page never displays secrets. Leave a saved password, API key, or token blank to keep the stored value; switching provider is how you stop using it.
+Admins can open **Settings** in the sidebar to edit that configuration and send a test email. The page never displays secrets. Leave a saved password, API key, or token blank to keep the stored value. Switching provider is how you stop using it.
 
 Verify credentials before enabling alerts with the admin-only test endpoint. Sign in, keep the cookie, then call it:
 
@@ -66,9 +70,9 @@ User creation and password reset require at least 12 characters, the same floor 
 
 `FIRST_ADMIN_PASSWORD` is validated at startup even when the users table already has rows, because settings load before the seed decides to skip. An existing install whose `.env` still holds a bootstrap password under 12 characters must replace that value before upgrading. The seed does not change an existing admin's password, so reset the password through the admin API if the old value should change as well.
 
-Monitor creation is admin-only. The prober follows redirects and does not block private address ranges, so an admin can point a monitor at an internal service or a public URL that redirects to one. Treat admin access as trust.
+Creating and editing monitors are admin-only. The prober follows redirects and does not block private address ranges, so an admin can point a monitor at an internal service or a public URL that redirects to one. Treat admin access as trust.
 
-Pausing a monitor closes its open incident at the pause time. Resuming starts a fresh check cycle, and a new failure opens a new incident.
+Pausing a monitor closes its open incident at the pause time. Resuming starts a fresh check cycle, so two consecutive failures are needed to open a new incident.
 
 ## Verify
 
@@ -97,6 +101,7 @@ The Phase 5 end-to-end verification record, with screenshots and database compar
 ```text
 backend/     FastAPI application, worker, and migrations
 frontend/    Next.js App Router dashboard
+docs/        Production deployment guide and verification records
 ```
 
 Implementation follows the phases in `PRD.md` and the matching GitHub issues.
